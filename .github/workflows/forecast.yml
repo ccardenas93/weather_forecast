@@ -2,7 +2,7 @@ name: Forecast Automation
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 * * * *'  # This cron expression schedules the job to run every hour
 
 jobs:
   run-forecast:
@@ -15,17 +15,28 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
+        python-version: '3.9'  # Specify your Python version
 
     - name: Install Dependencies
       run: |
-        pip install -r requirements.txt
+        pip install ecmwflibs eccodes cfgrib ecmwf-opendata
+        pip install pandas requests numpy matplotlib scikit-learn tensorflow statsmodels plotly xarray
 
     - name: Run Forecast Script
-      run: python forecast_script.py
+      run: python script.py  # Replace with the actual name of your script
+
+    - name: Commit and Push Results
+      run: |
+        git config --local user.email "actions@github.com"
+        git config --local user.name "GitHub Actions"
+        git add merged_data_export.csv
+        git commit -m "Updated forecast data"
+        git push
+      env:
+        GITHUB_TOKEN: ${{ secrets.WEATHER_FORECAST }}
 
     - name: Deploy to GitHub Pages
       uses: peaceiris/actions-gh-pages@v3
       with:
         github_token: ${{ secrets.WEATHER_FORECAST }}
-        publish_dir: ./  # Assuming the HTML file will be in the root directory
+        publish_dir: ./  # This will publish the root directory to GitHub Pages
