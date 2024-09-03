@@ -13,7 +13,7 @@ jobs:
       uses: actions/checkout@v3
 
     - name: Run Forecast Script
-      run: python script.py
+      run: python script.py  # Runs the script without installing dependencies
 
     - name: Configure Git
       run: |
@@ -39,4 +39,4 @@ jobs:
       uses: peaceiris/actions-gh-pages@v4
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./  # Publishes the root directory to GitHub Pages
+        publish_dir: ./
