@@ -47,4 +47,4 @@ jobs:
       uses: peaceiris/actions-gh-pages@v3
       with:
         github_token: ${{ secrets.WEATHER_FORECAST }}
-        publish_dir: ./  # This will publish the root directory to GitHub Pages
+        publish_dir: ./
