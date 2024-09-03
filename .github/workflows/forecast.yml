@@ -30,14 +30,16 @@ jobs:
         git config --local user.email "actions@github.com"
         git config --local user.name "GitHub Actions"
 
-    - name: Pull Latest Changes
-      run: git pull origin master  # Replace 'master' with 'main' if your default branch is named 'main'
+    - name: Force Sync with Remote
+      run: |
+        git fetch origin
+        git reset --hard origin/master  # Replace 'master' with 'main' if needed
 
     - name: Commit and Push Results
       run: |
         git add merged_data_export.csv
         git commit -m "Updated forecast data"
-        git push origin master  # Replace 'master' with 'main' if your default branch is named 'main'
+        git push origin master  # Replace 'master' with 'main' if needed
       env:
         GITHUB_TOKEN: ${{ secrets.WEATHER_FORECAST }}
 
