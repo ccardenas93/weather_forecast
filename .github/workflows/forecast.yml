@@ -25,16 +25,19 @@ jobs:
     - name: Run Forecast Script
       run: python script.py  # Replace with the actual name of your script
 
-    - name: Test Push Access
-      run: git push --dry-run  # This simulates the push without making changes
-
-    - name: Commit and Push Results
+    - name: Configure Git
       run: |
         git config --local user.email "actions@github.com"
         git config --local user.name "GitHub Actions"
+
+    - name: Pull Latest Changes
+      run: git pull origin master  # Replace 'master' with 'main' if your default branch is named 'main'
+
+    - name: Commit and Push Results
+      run: |
         git add merged_data_export.csv
         git commit -m "Updated forecast data"
-        git push
+        git push origin master  # Replace 'master' with 'main' if your default branch is named 'main'
       env:
         GITHUB_TOKEN: ${{ secrets.WEATHER_FORECAST }}
 
@@ -42,4 +45,4 @@ jobs:
       uses: peaceiris/actions-gh-pages@v3
       with:
         github_token: ${{ secrets.WEATHER_FORECAST }}
-        publish_dir: ./
+        publish_dir: ./  # This will publish the root directory to GitHub Pages
