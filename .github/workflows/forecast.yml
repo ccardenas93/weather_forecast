@@ -12,33 +12,17 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v3
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
-
-    - name: Install Dependencies in Virtual Environment
-      run: |
-        python -m venv venv
-        source venv/bin/activate
-        pip install --upgrade pip
-        pip install ecmwflibs eccodes cfgrib ecmwf-opendata
-        pip install pandas requests numpy matplotlib scikit-learn tensorflow statsmodels plotly xarray
-
     - name: Run Forecast Script
-      run: |
-        source venv/bin/activate
-        python script.py  # Replace with the actual name of your script
+      run: python script.py
 
     - name: Configure Git
       run: |
         git config --local user.email "actions@github.com"
         git config --local user.name "GitHub Actions"
 
-    - name: Pull and Merge Latest Changes
+    - name: Pull Latest Changes and Merge
       run: |
         git fetch origin
-        git checkout master
         git merge origin/master  # Merges remote changes into local branch
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -55,4 +39,4 @@ jobs:
       uses: peaceiris/actions-gh-pages@v4
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./
+        publish_dir: ./  # Publishes the root directory to GitHub Pages
