@@ -2,7 +2,7 @@ name: Forecast Automation
 
 on:
   schedule:
-    - cron: '0 * * * *'  # This cron expression schedules the job to run every hour
+    - cron: '0 * * * *'  # Runs the job every hour
 
 jobs:
   run-forecast:
@@ -10,41 +10,49 @@ jobs:
 
     steps:
     - name: Checkout Repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
 
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
 
-    - name: Install Dependencies
+    - name: Install Dependencies in Virtual Environment
       run: |
+        python -m venv venv
+        source venv/bin/activate
+        pip install --upgrade pip
         pip install ecmwflibs eccodes cfgrib ecmwf-opendata
         pip install pandas requests numpy matplotlib scikit-learn tensorflow statsmodels plotly xarray
 
     - name: Run Forecast Script
-      run: python script.py  # Replace with the actual name of your script
+      run: |
+        source venv/bin/activate
+        python script.py  # Replace with the actual name of your script
 
     - name: Configure Git
       run: |
         git config --local user.email "actions@github.com"
         git config --local user.name "GitHub Actions"
 
-    - name: Force Sync with Remote
+    - name: Pull and Merge Latest Changes
       run: |
         git fetch origin
-        git reset --hard origin/master  # Replace 'master' with 'main' if needed
+        git checkout master
+        git merge origin/master  # Merges remote changes into local branch
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Commit and Push Results
       run: |
         git add merged_data_export.csv
         git commit -m "Updated forecast data"
-        git push origin master  # Replace 'master' with 'main' if needed
+        git push origin master
       env:
-        GITHUB_TOKEN: ${{ secrets.WEATHER_FORECAST }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v3
+      uses: peaceiris/actions-gh-pages@v4
       with:
-        github_token: ${{ secrets.WEATHER_FORECAST }}
+        github_token: ${{ secrets.GITHUB_TOKEN }}
         publish_dir: ./
