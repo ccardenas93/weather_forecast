@@ -20,14 +20,10 @@ jobs:
         pip install pandas 
 
     - name: Run Forecast Script
-<<<<<<< HEAD
       
       run: |
         source venv/bin/activate
         python script.py
-=======
-      run: python script.py  # Runs the script without installing dependencies
->>>>>>> aaf093617c1bd5a99746e8fb028301ed48cecd6d
 
     - name: Configure Git
       run: |
