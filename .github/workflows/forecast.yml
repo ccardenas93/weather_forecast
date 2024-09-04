@@ -12,8 +12,18 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v3
 
+    - name: Install Dependencies in Virtual Environment
+      run: |
+        python -m venv venv
+        source venv/bin/activate
+        pip install --upgrade pip
+        pip install pandas 
+
     - name: Run Forecast Script
-      run: python script.py
+      
+      run: |
+        source venv/bin/activate
+        python script.py
 
     - name: Configure Git
       run: |
