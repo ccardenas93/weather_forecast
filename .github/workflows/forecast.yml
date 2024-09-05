@@ -17,13 +17,14 @@ jobs:
         python -m venv venv
         source venv/bin/activate
         pip install --upgrade pip
-        pip install pandas 
+        pip install pandas requests
+        pip install ecmwflibs eccodes cfgrib ecmwf-opendata
+        pip install tensorflow scikit-learn statsmodels plotly
 
     - name: Run Forecast Script
-      
       run: |
         source venv/bin/activate
-        python script.py
+        python Cardenas/Boletin_focos.ipynb  # Adjust to your script path
 
     - name: Configure Git
       run: |
@@ -49,4 +50,4 @@ jobs:
       uses: peaceiris/actions-gh-pages@v4
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./ ###test
+        publish_dir: ./ 
