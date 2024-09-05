@@ -24,7 +24,7 @@ jobs:
     - name: Run Forecast Script
       run: |
         source venv/bin/activate
-        python Cardenas/Boletin_focos.ipynb  # Adjust to your script path
+        python script.py  # Adjust to your script path
 
     - name: Configure Git
       run: |
