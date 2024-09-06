@@ -202,7 +202,7 @@ client = Client(source="ecmwf")
 client.retrieve(
     time=6,
     type="fc",
-    step=[0, 3, 6, 9, 12, 15, 18, 21, 24],
+    step=[0, 3, 6, 9, 12, 15, 18, 21, 24,27,30,33,36,39,42,45,48],
     param="2t",
     stream="oper",
     target="surface_temp_multi.grib2"
