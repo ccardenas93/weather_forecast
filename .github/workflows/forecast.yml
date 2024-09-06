@@ -40,14 +40,14 @@ jobs:
 
     - name: Commit and Push Results
       run: |
-        git add merged_data_export.csv
+        git add merged_data_export.csv forecast_Inaquito.html
         git commit -m "Updated forecast data"
         git push origin master
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v4
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./ 
+    #- name: Deploy to GitHub Pages
+    #  uses: peaceiris/actions-gh-pages@v4
+    #  with:
+    #    github_token: ${{ secrets.GITHUB_TOKEN }}
+    #    publish_dir: ./ 
