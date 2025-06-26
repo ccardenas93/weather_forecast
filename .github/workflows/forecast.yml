@@ -2,7 +2,7 @@ name: Forecast Automation
 
 on:
   schedule:
-    - cron: '0 * * * *'  # Runs the job every hour
+    - cron: '0 * * * *'  # Runs the job every hours
 
 jobs:
   run-forecast:
