@@ -75,7 +75,7 @@ def fetch_weather_data(start_date, end_date, station_id, table_names):
 
 # Example usage
 start_date = "2001-01-29T00:00:00"
-end_date = "2024-12-30T00:00:00"
+end_date = "2025-12-30T00:00:00"
 station_id = 63777
 df_weather = fetch_weather_data(start_date, end_date, station_id, table_names)
 df_weather.to_csv('merged_data_export.csv')
