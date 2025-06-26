@@ -10,13 +10,45 @@ table_names = [
     "029030101h", "029030401h", "029030201h",  # TEMPERATURA AIRE (MAX, PROM, MIN)
     #"004020101h", "037110101h", "004020201h", "037110201h", "037110401h"  # VIENTO DIRECCION - VIENTO VELOCIDAD
 ]
+
+# Mapping from table code to descriptive variable name returned by the previous
+# API. The new API only returns the code in the "nemonico" field, so we keep
+# using human readable names in the resulting dataframe.
+NAME_MAP = {
+    "009010101h": "HUMEDAD RELATIVA DEL AIRE MAX",
+    "009010201h": "HUMEDAD RELATIVA DEL AIRE MIN",
+    "009010401h": "HUMEDAD RELATIVA DEL AIRE PROM",
+    "017140801h": "PRECIPITACION SUM",
+    "018070201h": "PRESION ATMOSFERICA MIN",
+    "018070401h": "PRESION ATMOSFERICA PROM",
+    "018070101h": "PRESION ATMOSFERICA MAX",
+    "021200201h": "RADIACION SOLAR GLOBAL MIN",
+    "021200101h": "RADIACION SOLAR GLOBAL MAX",
+    "021200401h": "RADIACION SOLAR GLOBAL PROM",
+    "021200801h": "RADIACION SOLAR GLOBAL SUM",
+    "022200201h": "RADIACION SOLAR REFLEJADA MIN",
+    "022200401h": "RADIACION SOLAR REFLEJADA MAX",
+    "022200101h": "RADIACION SOLAR REFLEJADA PROM",
+    "029030101h": "TEMPERATURA AIRE MAX",
+    "029030401h": "TEMPERATURA AIRE PROM",
+    "029030201h": "TEMPERATURA AIRE MIN",
+}
 def fetch_weather_data(start_date, end_date, station_id, table_names):
-    url = "https://inamhi.gob.ec/api_rest/station_data_hourly/data"
+    """Retrieve hourly data from INAMHI API.
+
+    The API endpoint changed in 2024.  The new service uses
+    ``/station_data_hour/get_data_hour/`` and requires an ``id_aplication``
+    parameter.  The response now returns the measurement code in the
+    ``nemonico`` field and ``fecha_toma_dato`` for the timestamp.
+    """
+
+    url = "https://inamhi.gob.ec/api_rest/station_data_hour/get_data_hour/"
     payload = {
         "id_estacion": station_id,
         "table_names": table_names,
+        "id_aplication": 1,
         "start_date": start_date,
-        "end_date": end_date
+        "end_date": end_date,
     }
     response = requests.post(url, json=payload)
     if response.status_code != 200:
@@ -26,10 +58,11 @@ def fetch_weather_data(start_date, end_date, station_id, table_names):
 
     flattened_data = []
     for measurement in data:
-        variable_name = measurement['name']
+        code = measurement.get('nemonico')
+        variable_name = NAME_MAP.get(code, code)
         for entry in measurement['data']:
             flattened_data.append({
-                "fecha": entry['fecha'],
+                "fecha": entry['fecha_toma_dato'],
                 variable_name: entry['valor']
             })
 
