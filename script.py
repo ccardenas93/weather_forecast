@@ -113,7 +113,7 @@ data_cleaned.set_index('fecha', inplace=True)
 data_cleaned = data_cleaned.asfreq('h')
 
 # Check and handle missing data
-data_cleaned = data_cleaned.fillna(method='ffill').fillna(method='bfill')
+data_cleaned = data_cleaned.ffill().bfill()
 
 # Select temperature data and exogenous variables
 temperature_data = data_cleaned['TEMPERATURA AIRE MAX'].dropna()
