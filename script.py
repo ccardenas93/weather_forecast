@@ -110,7 +110,7 @@ data_cleaned['fecha'] = pd.to_datetime(data_cleaned['fecha'])
 data_cleaned.set_index('fecha', inplace=True)
 
 # Set the frequency to hourly ('H')
-data_cleaned = data_cleaned.asfreq('H')
+data_cleaned = data_cleaned.asfreq('h')
 
 # Check and handle missing data
 data_cleaned = data_cleaned.fillna(method='ffill').fillna(method='bfill')
@@ -131,7 +131,7 @@ results_sarimax = model_sarimax.fit(disp=False, maxiter=500)
 # Forecast the next 24 hours using SARIMAX
 forecast_steps = 24
 forecast_sarimax = results_sarimax.get_forecast(steps=forecast_steps, exog=exog_vars[-forecast_steps:])
-forecast_index = pd.date_range(start=temperature_data.index[-1] + pd.Timedelta(hours=1), periods=forecast_steps, freq='H')
+forecast_index = pd.date_range(start=temperature_data.index[-1] + pd.Timedelta(hours=1), periods=forecast_steps, freq='h')
 forecast_sarimax_values = forecast_sarimax.predicted_mean
 
 # Normalize only the temperature data for LSTM model
