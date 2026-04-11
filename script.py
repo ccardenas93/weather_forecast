@@ -87,7 +87,7 @@ def fetch_weather_data(start_date, end_date, station_id, table_names):
 
     return df
 
-end_timestamp = pd.Timestamp.utcnow()
+end_timestamp = pd.Timestamp.now(tz="UTC")
 end_date = os.getenv("END_DATE", end_timestamp.strftime("%Y-%m-%dT%H:%M:%S"))
 start_date = os.getenv(
     "START_DATE",
@@ -201,8 +201,8 @@ X_input = temperature_data_normalized[-time_step:].reshape(1, time_step, 1)
 # Generate LSTM forecast
 forecasted_temps_lstm = []
 for _ in range(forecast_steps):
-    forecasted_temp_normalized = model_lstm.predict(X_input)
-    forecasted_temps_lstm.append(forecasted_temp_normalized[0][0])
+    forecasted_temp_normalized = model_lstm.predict(X_input, verbose=0)[0, 0]
+    forecasted_temps_lstm.append(forecasted_temp_normalized)
     X_input = np.roll(X_input, -1, axis=1)
     X_input[0, -1, 0] = forecasted_temp_normalized
 
@@ -239,8 +239,8 @@ X_input_res = residuals_normalized[-time_step:].reshape(1, time_step, 1)
 forecasted_residuals = []
 
 for _ in range(forecast_steps):
-    forecasted_residual = model_lstm_res.predict(X_input_res)
-    forecasted_residuals.append(forecasted_residual[0][0])
+    forecasted_residual = model_lstm_res.predict(X_input_res, verbose=0)[0, 0]
+    forecasted_residuals.append(forecasted_residual)
     X_input_res = np.roll(X_input_res, -1, axis=1)
     X_input_res[0, -1, 0] = forecasted_residual
 
