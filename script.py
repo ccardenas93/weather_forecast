@@ -1,5 +1,16 @@
+import os
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
 import pandas as pd
 import requests
+
+
+MODEL_TRAINING_HOURS = int(os.getenv("MODEL_TRAINING_HOURS", "720"))
+SARIMAX_MAXITER = int(os.getenv("SARIMAX_MAXITER", "50"))
+LSTM_EPOCHS = int(os.getenv("LSTM_EPOCHS", "10"))
+LSTM_BATCH_SIZE = int(os.getenv("LSTM_BATCH_SIZE", "32"))
+FETCH_DAYS = int(os.getenv("FETCH_DAYS", "730"))
 
 table_names = [
     "009010101h", "009010201h", "009010401h",  # HUMEDAD RELATIVA DEL AIRE (MAX, MIN, PROM)
@@ -50,7 +61,7 @@ def fetch_weather_data(start_date, end_date, station_id, table_names):
         "start_date": start_date,
         "end_date": end_date,
     }
-    response = requests.post(url, json=payload)
+    response = requests.post(url, json=payload, timeout=120)
     if response.status_code != 200:
         raise Exception(f"Failed to retrieve data: {response.status_code}")
 
@@ -60,11 +71,14 @@ def fetch_weather_data(start_date, end_date, station_id, table_names):
     for measurement in data:
         code = measurement.get('nemonico')
         variable_name = NAME_MAP.get(code, code)
-        for entry in measurement['data']:
+        for entry in measurement.get('data', []):
             flattened_data.append({
                 "fecha": entry['fecha_toma_dato'],
                 variable_name: entry['valor']
             })
+
+    if not flattened_data:
+        raise RuntimeError(f"No weather data returned from {start_date} to {end_date}")
 
     df = pd.DataFrame(flattened_data)
 
@@ -73,17 +87,18 @@ def fetch_weather_data(start_date, end_date, station_id, table_names):
 
     return df
 
-# Example usage
-start_date = "2001-01-29T00:00:00"
-end_date = "2025-12-30T00:00:00"
+end_timestamp = pd.Timestamp.utcnow()
+end_date = os.getenv("END_DATE", end_timestamp.strftime("%Y-%m-%dT%H:%M:%S"))
+start_date = os.getenv(
+    "START_DATE",
+    (pd.Timestamp(end_date) - pd.Timedelta(days=FETCH_DAYS)).strftime("%Y-%m-%dT%H:%M:%S"),
+)
 station_id = 63777
 df_weather = fetch_weather_data(start_date, end_date, station_id, table_names)
-df_weather.to_csv('merged_data_export.csv')
+df_weather.to_csv('merged_data_export.csv', index=False)
 
 
-import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
@@ -115,6 +130,12 @@ data_cleaned = data_cleaned.asfreq('h')
 # Check and handle missing data
 data_cleaned = data_cleaned.ffill().bfill()
 
+# Keep scheduled runs bounded. SARIMAX with hourly seasonality and many
+# exogenous variables is the slowest part of the workflow on GitHub runners.
+if MODEL_TRAINING_HOURS > 0 and len(data_cleaned) > MODEL_TRAINING_HOURS:
+    data_cleaned = data_cleaned.tail(MODEL_TRAINING_HOURS)
+print(f"Using {len(data_cleaned)} hourly rows for model training", flush=True)
+
 # Select temperature data and exogenous variables
 temperature_data = data_cleaned['TEMPERATURA AIRE MAX'].dropna()
 exog_vars = data_cleaned.drop(columns=['TEMPERATURA AIRE MAX'])
@@ -123,10 +144,12 @@ exog_vars = data_cleaned.drop(columns=['TEMPERATURA AIRE MAX'])
 temperature_data = temperature_data.reindex(exog_vars.index)
 
 # Fit SARIMAX model with exogenous variables
+print("Fitting SARIMAX model", flush=True)
 model_sarimax = SARIMAX(temperature_data, exog=exog_vars,
                         order=(1, 1, 1), seasonal_order=(1, 1, 1, 24),
                         enforce_stationarity=False, enforce_invertibility=False)
-results_sarimax = model_sarimax.fit(disp=False, maxiter=500)
+results_sarimax = model_sarimax.fit(disp=False, maxiter=SARIMAX_MAXITER)
+print("SARIMAX model fitted", flush=True)
 
 # Forecast the next 24 hours using SARIMAX
 forecast_steps = 24
@@ -170,7 +193,7 @@ model_lstm.add(Dense(25))
 model_lstm.add(Dense(1))
 
 model_lstm.compile(optimizer='adam', loss='mean_squared_error')
-model_lstm.fit(X_train, Y_train, batch_size=16, epochs=100, verbose=1)
+model_lstm.fit(X_train, Y_train, batch_size=LSTM_BATCH_SIZE, epochs=LSTM_EPOCHS, verbose=1)
 
 # Prepare input for LSTM forecast
 X_input = temperature_data_normalized[-time_step:].reshape(1, time_step, 1)
@@ -209,7 +232,7 @@ model_lstm_res.add(Dense(25))
 model_lstm_res.add(Dense(1))
 
 model_lstm_res.compile(optimizer='adam', loss='mean_squared_error')
-model_lstm_res.fit(X_train_res, Y_train_res, batch_size=16, epochs=100, verbose=1)
+model_lstm_res.fit(X_train_res, Y_train_res, batch_size=LSTM_BATCH_SIZE, epochs=LSTM_EPOCHS, verbose=1)
 
 # Forecast residuals using LSTM
 X_input_res = residuals_normalized[-time_step:].reshape(1, time_step, 1)

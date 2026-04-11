@@ -3,10 +3,28 @@ name: Forecast Automation
 on:
   schedule:
     - cron: '0 * * * *'  # Runs the job every hours
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/forecast.yml'
+      - 'script.py'
+      - 'requirements.txt'
+
+permissions:
+  contents: write
 
 jobs:
   run-forecast:
     runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      MODEL_TRAINING_HOURS: "720"
+      SARIMAX_MAXITER: "50"
+      LSTM_EPOCHS: "10"
+      LSTM_BATCH_SIZE: "32"
+      FETCH_DAYS: "730"
 
     steps:
     - name: Checkout Repository
@@ -14,38 +32,37 @@ jobs:
     - uses: actions/setup-python@v5      
       with:
         python-version: '3.11'
+        cache: 'pip'
 
-    - name: Install Dependencies in Virtual Environment
+    - name: Install Dependencies
       run: |
-        python -m venv venv
-        source venv/bin/activate
-        pip install --upgrade pip
-        pip install pandas requests matplotlib xarray
-        pip install ecmwflibs eccodes cfgrib ecmwf-opendata
-        pip install tensorflow scikit-learn statsmodels plotly
+        python -m pip install --upgrade pip
+        python -m pip install -r requirements.txt
 
     - name: Run Forecast Script
       run: |
-        source venv/bin/activate
-        python script.py  # Adjust to your script path
+        python script.py
 
     - name: Configure Git
       run: |
         git config --local user.email "actions@github.com"
         git config --local user.name "GitHub Actions"
 
-    - name: Pull Latest Changes and Merge
+    - name: Pull Latest Changes
       run: |
-        git fetch origin
-        git merge origin/master  # Merges remote changes into local branch
+        git pull --rebase --autostash origin master
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Commit and Push Results
       run: |
         git add merged_data_export.csv forecast_Inaquito.html
-        git commit -m "Updated forecast data"
-        git push origin master
+        if git diff --staged --quiet; then
+          echo "No forecast changes to commit"
+        else
+          git commit -m "Updated forecast data"
+          git push origin master
+        fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
