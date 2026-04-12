@@ -1,11 +1,9 @@
 pandas
+numpy
 requests
 xarray
 ecmwflibs
 eccodes
 cfgrib
 ecmwf-opendata
-tensorflow
-scikit-learn
-statsmodels
 plotly

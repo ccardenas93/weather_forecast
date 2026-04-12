@@ -20,11 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 55
     env:
-      MODEL_TRAINING_HOURS: "720"
-      SARIMAX_MAXITER: "50"
-      LSTM_EPOCHS: "10"
-      LSTM_BATCH_SIZE: "32"
       FETCH_DAYS: "730"
+      TARGET_COLUMN: "TEMPERATURA AIRE PROM"
+      BIAS_DECAY_HOURS: "36"
+      ECMWF_RUN_HOUR: "6"
+      ECMWF_STEPS: "0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48"
 
     steps:
     - name: Checkout Repository
@@ -57,6 +57,7 @@ jobs:
     - name: Commit and Push Results
       run: |
         git add merged_data_export.csv forecast_Inaquito.html
+        git add forecast_output.csv
         if git diff --staged --quiet; then
           echo "No forecast changes to commit"
         else

@@ -1,30 +1,43 @@
 import os
+from pathlib import Path
 
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import requests
+from ecmwf.opendata import Client
+import cfgrib
 
 
-MODEL_TRAINING_HOURS = int(os.getenv("MODEL_TRAINING_HOURS", "720"))
-SARIMAX_MAXITER = int(os.getenv("SARIMAX_MAXITER", "50"))
-LSTM_EPOCHS = int(os.getenv("LSTM_EPOCHS", "10"))
-LSTM_BATCH_SIZE = int(os.getenv("LSTM_BATCH_SIZE", "32"))
 FETCH_DAYS = int(os.getenv("FETCH_DAYS", "730"))
+BIAS_DECAY_HOURS = float(os.getenv("BIAS_DECAY_HOURS", "36"))
+ECMWF_RUN_HOUR = int(os.getenv("ECMWF_RUN_HOUR", "6"))
+ECMWF_STEPS = [
+    int(step.strip())
+    for step in os.getenv("ECMWF_STEPS", "0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48").split(",")
+    if step.strip()
+]
 
-table_names = [
+STATION_ID = 63777
+STATION_NAME = "Inaquito"
+STATION_LAT = -0.178300
+STATION_LON = -78.487700
+TARGET_COLUMN = os.getenv("TARGET_COLUMN", "TEMPERATURA AIRE PROM")
+
+RAW_DATA_PATH = Path("merged_data_export.csv")
+ECMWF_GRIB_PATH = Path("surface_temp_multi.grib2")
+FORECAST_CSV_PATH = Path("forecast_output.csv")
+FORECAST_HTML_PATH = Path("forecast_Inaquito.html")
+
+TABLE_NAMES = [
     "009010101h", "009010201h", "009010401h",  # HUMEDAD RELATIVA DEL AIRE (MAX, MIN, PROM)
     "017140801h",  # PRECIPITACION (SUM)
     "018070201h", "018070401h", "018070101h",  # PRESION ATMOSFERICA (MIN, PROM, MAX)
     "021200201h", "021200101h", "021200401h", "021200801h",  # RADIACION SOLAR GLOBAL (MIN, MAX, PROM, SUM)
     "022200201h", "022200401h", "022200101h",  # RADIACION SOLAR REFLEJADA (MIN, PROM, MAX)
     "029030101h", "029030401h", "029030201h",  # TEMPERATURA AIRE (MAX, PROM, MIN)
-    #"004020101h", "037110101h", "004020201h", "037110201h", "037110401h"  # VIENTO DIRECCION - VIENTO VELOCIDAD
 ]
 
-# Mapping from table code to descriptive variable name returned by the previous
-# API. The new API only returns the code in the "nemonico" field, so we keep
-# using human readable names in the resulting dataframe.
 NAME_MAP = {
     "009010101h": "HUMEDAD RELATIVA DEL AIRE MAX",
     "009010201h": "HUMEDAD RELATIVA DEL AIRE MIN",
@@ -44,14 +57,10 @@ NAME_MAP = {
     "029030401h": "TEMPERATURA AIRE PROM",
     "029030201h": "TEMPERATURA AIRE MIN",
 }
-def fetch_weather_data(start_date, end_date, station_id, table_names):
-    """Retrieve hourly data from INAMHI API.
 
-    The API endpoint changed in 2024.  The new service uses
-    ``/station_data_hour/get_data_hour/`` and requires an ``id_aplication``
-    parameter.  The response now returns the measurement code in the
-    ``nemonico`` field and ``fecha_toma_dato`` for the timestamp.
-    """
+
+def fetch_weather_data(start_date, end_date, station_id, table_names):
+    """Retrieve hourly observations from the INAMHI API."""
 
     url = "https://inamhi.gob.ec/api_rest/station_data_hour/get_data_hour/"
     payload = {
@@ -63,265 +72,270 @@ def fetch_weather_data(start_date, end_date, station_id, table_names):
     }
     response = requests.post(url, json=payload, timeout=120)
     if response.status_code != 200:
-        raise Exception(f"Failed to retrieve data: {response.status_code}")
-
-    data = response.json()
+        raise RuntimeError(f"Failed to retrieve data: {response.status_code}")
 
     flattened_data = []
-    for measurement in data:
-        code = measurement.get('nemonico')
+    for measurement in response.json():
+        code = measurement.get("nemonico")
         variable_name = NAME_MAP.get(code, code)
-        for entry in measurement.get('data', []):
+        for entry in measurement.get("data", []):
             flattened_data.append({
-                "fecha": entry['fecha_toma_dato'],
-                variable_name: entry['valor']
+                "fecha": entry["fecha_toma_dato"],
+                variable_name: entry["valor"],
             })
 
     if not flattened_data:
         raise RuntimeError(f"No weather data returned from {start_date} to {end_date}")
 
-    df = pd.DataFrame(flattened_data)
-
-    # Ensure that data is aligned properly by grouping by date and merging similar columns
-    df = df.groupby('fecha').first().reset_index()
-
-    return df
-
-end_timestamp = pd.Timestamp.now(tz="UTC")
-end_date = os.getenv("END_DATE", end_timestamp.strftime("%Y-%m-%dT%H:%M:%S"))
-start_date = os.getenv(
-    "START_DATE",
-    (pd.Timestamp(end_date) - pd.Timedelta(days=FETCH_DAYS)).strftime("%Y-%m-%dT%H:%M:%S"),
-)
-station_id = 63777
-df_weather = fetch_weather_data(start_date, end_date, station_id, table_names)
-df_weather.to_csv('merged_data_export.csv', index=False)
+    return pd.DataFrame(flattened_data).groupby("fecha").first().reset_index()
 
 
-import numpy as np
-from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-import plotly.graph_objects as go
-import cfgrib
-import xarray as xr
+def load_station_target(raw_data_path):
+    data = pd.read_csv(raw_data_path)
+    data = data.loc[:, ~data.columns.str.contains("^Unnamed")]
+    if TARGET_COLUMN not in data.columns:
+        raise RuntimeError(f"Missing required target column: {TARGET_COLUMN}")
 
-# Load and clean the dataset
-file_path = 'merged_data_export.csv'  # Replace with the correct path
-data = pd.read_csv(file_path, delimiter=',')
+    data["fecha"] = pd.to_datetime(data["fecha"], utc=True).dt.tz_convert(None)
+    data = data.sort_values("fecha").set_index("fecha")
+    for column in data.columns:
+        data[column] = pd.to_numeric(data[column], errors="coerce")
 
-# Drop any unnamed columns
-data = data.loc[:, ~data.columns.str.contains('^Unnamed')]
+    hourly = data.asfreq("h")
+    target = hourly[TARGET_COLUMN].interpolate(method="time", limit=3)
+    target = target.ffill(limit=3).bfill(limit=3).dropna()
+    if target.empty:
+        raise RuntimeError(f"No usable observations for {TARGET_COLUMN}")
 
-# Drop the 'TEMPERATURA AIRE MIN' column if present
-if 'TEMPERATURA AIRE MIN' in data.columns:
-    data_cleaned = data.drop(columns=['TEMPERATURA AIRE MIN'])
-else:
-    data_cleaned = data.copy()
+    return target
 
-# Convert the 'fecha' column to datetime format and set it as the index
-data_cleaned['fecha'] = pd.to_datetime(data_cleaned['fecha'])
-data_cleaned.set_index('fecha', inplace=True)
 
-# Set the frequency to hourly ('H')
-data_cleaned = data_cleaned.asfreq('h')
+def download_ecmwf_temperature():
+    client = Client(source="ecmwf")
+    client.retrieve(
+        time=ECMWF_RUN_HOUR,
+        type="fc",
+        step=ECMWF_STEPS,
+        param="2t",
+        stream="oper",
+        target=str(ECMWF_GRIB_PATH),
+    )
 
-# Check and handle missing data
-data_cleaned = data_cleaned.ffill().bfill()
+    ds = cfgrib.open_dataset(str(ECMWF_GRIB_PATH))
+    try:
+        temperature = ds["t2m"].sel(latitude=STATION_LAT, longitude=STATION_LON, method="nearest")
+        values_c = np.asarray(temperature.values).reshape(-1) - 273.15
+        valid_times = pd.to_datetime(np.asarray(ds["valid_time"].values).reshape(-1))
 
-# Keep scheduled runs bounded. SARIMAX with hourly seasonality and many
-# exogenous variables is the slowest part of the workflow on GitHub runners.
-if MODEL_TRAINING_HOURS > 0 and len(data_cleaned) > MODEL_TRAINING_HOURS:
-    data_cleaned = data_cleaned.tail(MODEL_TRAINING_HOURS)
-print(f"Using {len(data_cleaned)} hourly rows for model training", flush=True)
+        forecast = pd.DataFrame({
+            "valid_time": valid_times,
+            "ecmwf_2t_c": values_c,
+        }).dropna()
+        forecast = forecast.sort_values("valid_time").drop_duplicates("valid_time")
 
-# Select temperature data and exogenous variables
-temperature_data = data_cleaned['TEMPERATURA AIRE MAX'].dropna()
-exog_vars = data_cleaned.drop(columns=['TEMPERATURA AIRE MAX'])
+        if "step" in ds.coords:
+            steps = pd.to_timedelta(np.asarray(ds["step"].values).reshape(-1)).total_seconds() / 3600
+            if len(steps) == len(forecast):
+                forecast["lead_hours"] = steps
+            else:
+                forecast["lead_hours"] = (
+                    forecast["valid_time"] - forecast["valid_time"].min()
+                ).dt.total_seconds() / 3600
+        else:
+            forecast["lead_hours"] = (
+                forecast["valid_time"] - forecast["valid_time"].min()
+            ).dt.total_seconds() / 3600
 
-# Align temperature data with exog_vars using reindex
-temperature_data = temperature_data.reindex(exog_vars.index)
+        if forecast.empty:
+            raise RuntimeError("ECMWF returned no usable 2t forecast values")
+        return forecast
+    finally:
+        ds.close()
 
-# Fit SARIMAX model with exogenous variables
-print("Fitting SARIMAX model", flush=True)
-model_sarimax = SARIMAX(temperature_data, exog=exog_vars,
-                        order=(1, 1, 1), seasonal_order=(1, 1, 1, 24),
-                        enforce_stationarity=False, enforce_invertibility=False)
-results_sarimax = model_sarimax.fit(disp=False, maxiter=SARIMAX_MAXITER)
-print("SARIMAX model fitted", flush=True)
 
-# Forecast the next 24 hours using SARIMAX
-forecast_steps = 24
-forecast_sarimax = results_sarimax.get_forecast(steps=forecast_steps, exog=exog_vars[-forecast_steps:])
-forecast_index = pd.date_range(start=temperature_data.index[-1] + pd.Timedelta(hours=1), periods=forecast_steps, freq='h')
-forecast_sarimax_values = forecast_sarimax.predicted_mean
+def align_observations_to_forecast(forecast, target):
+    observations = target.rename("observed_temp_c").reset_index()
+    observations = observations.rename(columns={observations.columns[0]: "valid_time"})
+    return forecast.merge(observations, on="valid_time", how="left")
 
-# Normalize only the temperature data for LSTM model
-scaler = MinMaxScaler(feature_range=(0, 1))
-temperature_data_normalized = scaler.fit_transform(temperature_data.values.reshape(-1, 1))
 
-# Function to create dataset for LSTM model
-def create_dataset(data, time_step=1):
-    X, Y = [], []
-    for i in range(len(data) - time_step - 1):
-        X.append(data[i:(i + time_step), :])
-        Y.append(data[i + time_step, 0])
-    return np.array(X), np.array(Y)
+def compute_local_bias(forecast, target):
+    latest_observation_time = target.index.max()
+    latest_observation_c = float(target.loc[latest_observation_time])
 
-time_step = 24
-X, Y = create_dataset(temperature_data_normalized, time_step)
+    overlap = align_observations_to_forecast(forecast, target)
+    overlap = overlap[overlap["valid_time"] <= latest_observation_time].dropna(subset=["observed_temp_c"])
 
-# Split the data into training and testing sets
-train_size = int(len(X) * 0.8)
-X_train, X_test = X[:train_size], X[train_size:]
-Y_train, Y_test = Y[:train_size], Y[train_size:]
+    if not overlap.empty:
+        bias_samples = overlap["observed_temp_c"] - overlap["ecmwf_2t_c"]
+        bias_c = float(bias_samples.median())
+        raw_mae_c = float(bias_samples.abs().mean())
+        raw_rmse_c = float(np.sqrt(np.mean(np.square(bias_samples))))
+        uncertainty_c = max(1.5, raw_mae_c)
+        source = f"median of {len(overlap)} current-run overlap point(s)"
+    else:
+        nearest_index = (forecast["valid_time"] - latest_observation_time).abs().idxmin()
+        nearest_forecast = forecast.loc[nearest_index]
+        hours_apart = abs((nearest_forecast["valid_time"] - latest_observation_time).total_seconds()) / 3600
+        if hours_apart <= 6:
+            bias_c = latest_observation_c - float(nearest_forecast["ecmwf_2t_c"])
+            source = f"latest observation vs nearest ECMWF valid time ({hours_apart:.1f} h apart)"
+        else:
+            bias_c = 0.0
+            source = "no recent overlap; raw ECMWF used"
+        raw_mae_c = np.nan
+        raw_rmse_c = np.nan
+        uncertainty_c = 2.0
 
-# Check if X_train and X_test have three dimensions, reshape if needed
-if X_train.ndim == 2:
-    X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
-    X_test = X_test.reshape(X_test.shape[0], X_test.shape[1], 1)
+    return {
+        "bias_c": bias_c,
+        "bias_source": source,
+        "raw_mae_c": raw_mae_c,
+        "raw_rmse_c": raw_rmse_c,
+        "uncertainty_c": uncertainty_c,
+        "latest_observation_time": latest_observation_time,
+        "latest_observation_c": latest_observation_c,
+    }
 
-# Build the LSTM model
-model_lstm = Sequential()
-model_lstm.add(Input(shape=(time_step, 1)))
-model_lstm.add(LSTM(50, return_sequences=True))
-model_lstm.add(Dropout(0.2))
-model_lstm.add(LSTM(50, return_sequences=False))
-model_lstm.add(Dropout(0.2))
-model_lstm.add(Dense(25))
-model_lstm.add(Dense(1))
 
-model_lstm.compile(optimizer='adam', loss='mean_squared_error')
-model_lstm.fit(X_train, Y_train, batch_size=LSTM_BATCH_SIZE, epochs=LSTM_EPOCHS, verbose=1)
+def apply_bias_correction(forecast, bias_info):
+    corrected = forecast.copy()
+    hours_after_latest_obs = (
+        corrected["valid_time"] - bias_info["latest_observation_time"]
+    ).dt.total_seconds() / 3600
+    hours_after_latest_obs = hours_after_latest_obs.clip(lower=0)
 
-# Prepare input for LSTM forecast
-X_input = temperature_data_normalized[-time_step:].reshape(1, time_step, 1)
+    decay = np.exp(-hours_after_latest_obs / BIAS_DECAY_HOURS)
+    corrected["bias_correction_c"] = bias_info["bias_c"] * decay
+    corrected["forecast_temp_c"] = corrected["ecmwf_2t_c"] + corrected["bias_correction_c"]
+    corrected["persistence_temp_c"] = bias_info["latest_observation_c"]
+    corrected["uncertainty_c"] = bias_info["uncertainty_c"]
+    corrected["forecast_lower_c"] = corrected["forecast_temp_c"] - corrected["uncertainty_c"]
+    corrected["forecast_upper_c"] = corrected["forecast_temp_c"] + corrected["uncertainty_c"]
+    return corrected
 
-# Generate LSTM forecast
-forecasted_temps_lstm = []
-for _ in range(forecast_steps):
-    forecasted_temp_normalized = model_lstm.predict(X_input, verbose=0)[0, 0]
-    forecasted_temps_lstm.append(forecasted_temp_normalized)
-    X_input = np.roll(X_input, -1, axis=1)
-    X_input[0, -1, 0] = forecasted_temp_normalized
 
-# Convert LSTM forecast back to original scale
-forecasted_temps_lstm = np.array(forecasted_temps_lstm).reshape(-1, 1)
-forecasted_temps_lstm = scaler.inverse_transform(forecasted_temps_lstm)
+def build_plot(target, forecast, bias_info):
+    future = forecast[forecast["valid_time"] > bias_info["latest_observation_time"]].copy()
+    if future.empty:
+        future = forecast.copy()
 
-# Calculate SARIMAX residuals and fit LSTM on them for the hybrid model
-residuals = results_sarimax.resid
-residuals_normalized = scaler.fit_transform(residuals.values.reshape(-1, 1))
+    if pd.notna(bias_info["raw_rmse_c"]):
+        rmse_text = f"{bias_info['raw_rmse_c']:.2f} C"
+    else:
+        rmse_text = "n/a"
+    diagnostic = (
+        f"Bias correction: {bias_info['bias_c']:.2f} C ({bias_info['bias_source']}). "
+        f"Raw ECMWF recent RMSE: {rmse_text}"
+    )
 
-X_residuals, Y_residuals = create_dataset(residuals_normalized, time_step)
-X_residuals = X_residuals.reshape(X_residuals.shape[0], X_residuals.shape[1], 1)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=target.index[-120:],
+        y=target.iloc[-120:],
+        mode="lines",
+        name=f"Observed {TARGET_COLUMN}",
+        line=dict(color="#1f77b4"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=forecast["valid_time"],
+        y=forecast["ecmwf_2t_c"],
+        mode="lines+markers",
+        name="Raw ECMWF 2m temperature",
+        line=dict(color="#2ca02c", dash="dash"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=future["valid_time"],
+        y=future["forecast_upper_c"],
+        mode="lines",
+        name="Forecast upper band",
+        showlegend=False,
+        line=dict(color="rgba(214, 39, 40, 0.15)"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=future["valid_time"],
+        y=future["forecast_lower_c"],
+        mode="lines",
+        name="Forecast uncertainty band",
+        fill="tonexty",
+        fillcolor="rgba(214, 39, 40, 0.15)",
+        line=dict(color="rgba(214, 39, 40, 0.15)"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=future["valid_time"],
+        y=future["forecast_temp_c"],
+        mode="lines+markers",
+        name="Bias-corrected ECMWF forecast",
+        line=dict(color="#d62728"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=future["valid_time"],
+        y=future["persistence_temp_c"],
+        mode="lines",
+        name="Persistence baseline",
+        line=dict(color="#7f7f7f", dash="dot"),
+    ))
 
-# Split the residual data into training and testing sets
-X_train_res, X_test_res = X_residuals[:train_size], X_residuals[train_size:]
-Y_train_res, Y_test_res = Y_residuals[:train_size], Y_residuals[train_size:]
+    fig.add_vline(
+        x=bias_info["latest_observation_time"],
+        line_dash="dot",
+        line_color="#444444",
+        annotation_text="latest observation",
+        annotation_position="top left",
+    )
+    fig.update_layout(
+        title=f"{STATION_NAME} Temperature Forecast: ECMWF with Local Bias Correction",
+        xaxis_title="UTC time",
+        yaxis_title="Temperature (C)",
+        legend=dict(x=0.01, y=0.99),
+        annotations=[
+            dict(
+                text=diagnostic,
+                xref="paper",
+                yref="paper",
+                x=0,
+                y=-0.18,
+                showarrow=False,
+                align="left",
+            )
+        ],
+        margin=dict(b=110),
+    )
+    fig.write_html(str(FORECAST_HTML_PATH))
 
-# Build LSTM model for residuals
-model_lstm_res = Sequential()
-model_lstm_res.add(Input(shape=(time_step, 1)))
-model_lstm_res.add(LSTM(50, return_sequences=True))
-model_lstm_res.add(Dropout(0.2))
-model_lstm_res.add(LSTM(50, return_sequences=False))
-model_lstm_res.add(Dropout(0.2))
-model_lstm_res.add(Dense(25))
-model_lstm_res.add(Dense(1))
 
-model_lstm_res.compile(optimizer='adam', loss='mean_squared_error')
-model_lstm_res.fit(X_train_res, Y_train_res, batch_size=LSTM_BATCH_SIZE, epochs=LSTM_EPOCHS, verbose=1)
+def main():
+    end_timestamp = pd.Timestamp.now(tz="UTC")
+    end_date = os.getenv("END_DATE", end_timestamp.strftime("%Y-%m-%dT%H:%M:%S"))
+    start_date = os.getenv(
+        "START_DATE",
+        (pd.Timestamp(end_date) - pd.Timedelta(days=FETCH_DAYS)).strftime("%Y-%m-%dT%H:%M:%S"),
+    )
 
-# Forecast residuals using LSTM
-X_input_res = residuals_normalized[-time_step:].reshape(1, time_step, 1)
-forecasted_residuals = []
+    print(f"Fetching INAMHI observations from {start_date} to {end_date}", flush=True)
+    raw_weather = fetch_weather_data(start_date, end_date, STATION_ID, TABLE_NAMES)
+    raw_weather.to_csv(RAW_DATA_PATH, index=False)
 
-for _ in range(forecast_steps):
-    forecasted_residual = model_lstm_res.predict(X_input_res, verbose=0)[0, 0]
-    forecasted_residuals.append(forecasted_residual)
-    X_input_res = np.roll(X_input_res, -1, axis=1)
-    X_input_res[0, -1, 0] = forecasted_residual
+    target = load_station_target(RAW_DATA_PATH)
+    print(
+        f"Loaded {len(target)} usable hourly {TARGET_COLUMN} observations; "
+        f"latest at {target.index.max()} UTC",
+        flush=True,
+    )
 
-# Convert residuals back to original scale
-forecasted_residuals = np.array(forecasted_residuals).reshape(-1, 1)
-forecasted_residuals = scaler.inverse_transform(forecasted_residuals)
+    print(f"Retrieving ECMWF 2t forecast for {STATION_NAME}", flush=True)
+    raw_forecast = download_ecmwf_temperature()
+    bias_info = compute_local_bias(raw_forecast, target)
+    corrected_forecast = apply_bias_correction(raw_forecast, bias_info)
+    corrected_forecast.to_csv(FORECAST_CSV_PATH, index=False)
+    build_plot(target, corrected_forecast, bias_info)
 
-# Combine SARIMAX and LSTM residuals for hybrid forecast
-hybrid_forecast = forecast_sarimax_values + forecasted_residuals.flatten()
+    print(
+        f"Saved {FORECAST_CSV_PATH} and {FORECAST_HTML_PATH}; "
+        f"local bias correction {bias_info['bias_c']:.2f} C",
+        flush=True,
+    )
 
-# Download ECMWF Data
-from ecmwf.opendata import Client
 
-client = Client(source="ecmwf")
-client.retrieve(
-    time=6,
-    type="fc",
-    step=[0, 3, 6, 9, 12, 15, 18, 21, 24,27,30,33,36,39,42,45,48],
-    param="2t",
-    stream="oper",
-    target="surface_temp_multi.grib2"
-)
-
-ds = cfgrib.open_dataset('surface_temp_multi.grib2')
-
-lat = -0.178300
-lon = -78.487700
-temperature = ds['t2m'].sel(latitude=lat, longitude=lon, method='nearest')
-temperature_celsius = temperature - 273.15
-valid_times = ds['valid_time']
-
-ecmwf_df = pd.DataFrame({'Time': valid_times.values, 'Temperature': temperature_celsius.values})
-
-# Plot SARIMAX, LSTM, Hybrid, and ECMWF data
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=temperature_data.index[-100:], y=temperature_data.iloc[-100:],
-                         mode='lines', name='Observed TEMPERATURA_AIRE_MAX', line=dict(color='blue')))
-fig.add_trace(go.Scatter(x=forecast_index, y=forecast_sarimax_values,
-                         mode='lines', name='SARIMAX Forecast', line=dict(color='blue', dash='dash')))
-fig.add_trace(go.Scatter(x=forecast_index, y=forecasted_temps_lstm.flatten(),
-                         mode='lines', name='LSTM Forecast', line=dict(color='red')))
-fig.add_trace(go.Scatter(x=forecast_index, y=hybrid_forecast,
-                         mode='lines', name='Hybrid SARIMAX-LSTM Forecast', line=dict(color='purple')))
-fig.add_trace(go.Scatter(x=forecast_index,
-                         y=forecast_sarimax.conf_int().iloc[:, 0],
-                         mode='lines', name='SARIMAX Lower CI', line=dict(color='blue', dash='dash'), showlegend=False))
-fig.add_trace(go.Scatter(x=forecast_index,
-                         y=forecast_sarimax.conf_int().iloc[:, 1],
-                         mode='lines', name='SARIMAX Upper CI', line=dict(color='blue', dash='dash'), fill='tonexty', showlegend=False))
-fig.add_trace(go.Scatter(x=ecmwf_df['Time'], y=ecmwf_df['Temperature'],
-                         mode='lines', name='ECMWF Forecast', line=dict(color='green')))
-
-# Add buttons to toggle SARIMAX confidence intervals on/off
-fig.update_layout(
-    title="TEMPERATURA_AIRE_MAX Forecast with SARIMAX, LSTM, Hybrid, and ECMWF Models INAQUITO",
-    xaxis_title="Date",
-    yaxis_title="TEMPERATURA_AIRE_MAX (°C)",
-    legend=dict(x=0.01, y=0.99),
-    updatemenus=[
-        {
-            "buttons": [
-                {
-                    "args": [{"visible": [True, True, True, True, False, False, True]}],
-                    "label": "Hide SARIMAX CI",
-                    "method": "update",
-                },
-                {
-                    "args": [{"visible": [True, True, True, True, True, True, True]}],
-                    "label": "Show SARIMAX CI",
-                    "method": "update",
-                }
-            ],
-            "direction": "down",
-            "showactive": True,
-            "x": 0.17,
-            "xanchor": "left",
-            "y": 1.15,
-            "yanchor": "top"
-        }
-    ]
-)
-
-#save figure
-fig.write_html('forecast_Inaquito.html')
+if __name__ == "__main__":
+    main()
