@@ -293,12 +293,16 @@ def build_plot(target, forecast, bias_info):
         line=dict(color="#7f7f7f", dash="dot"),
     ))
 
-    fig.add_vline(
-        x=bias_info["latest_observation_time"],
-        line_dash="dot",
-        line_color="#444444",
-        annotation_text="latest observation",
-        annotation_position="top left",
+    latest_observation_time = bias_info["latest_observation_time"].to_pydatetime()
+    fig.add_shape(
+        type="line",
+        x0=latest_observation_time,
+        x1=latest_observation_time,
+        y0=0,
+        y1=1,
+        xref="x",
+        yref="paper",
+        line=dict(color="#444444", dash="dot"),
     )
     fig.update_layout(
         title=f"{STATION_NAME} Temperature Forecast: ECMWF with Local Bias Correction",
@@ -306,6 +310,16 @@ def build_plot(target, forecast, bias_info):
         yaxis_title="Temperature (C)",
         legend=dict(x=0.01, y=0.99),
         annotations=[
+            dict(
+                text="latest observation",
+                x=latest_observation_time,
+                y=1,
+                xref="x",
+                yref="paper",
+                showarrow=False,
+                xanchor="left",
+                yanchor="bottom",
+            ),
             dict(
                 text=diagnostic,
                 xref="paper",
