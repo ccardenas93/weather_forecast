@@ -29,6 +29,7 @@ ECMWF_PARAMS = [
     for param in os.getenv("ECMWF_PARAMS", "mx2t3,2t,mn2t3").split(",")
     if param.strip()
 ]
+ECMWF_SOURCE = os.getenv("ECMWF_SOURCE", "aws")
 
 STATION_ID = 63777
 STATION_NAME = "Inaquito"
@@ -219,7 +220,7 @@ def extract_station_series(ds, variable, value_column):
 
 
 def download_ecmwf_temperatures():
-    client = Client(source="ecmwf")
+    client = Client(source=ECMWF_SOURCE)
     client.retrieve(
         time=ECMWF_RUN_HOUR,
         type="fc",
@@ -823,7 +824,11 @@ def main():
         flush=True,
     )
 
-    print(f"Retrieving ECMWF max/prom/min 2m temperature forecast for {STATION_NAME}", flush=True)
+    print(
+        f"Retrieving ECMWF max/prom/min 2m temperature forecast for {STATION_NAME} "
+        f"from {ECMWF_SOURCE}",
+        flush=True,
+    )
     raw_forecast = download_ecmwf_temperatures()
     bias_by_target = {
         target_key: compute_local_bias(

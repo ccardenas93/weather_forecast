@@ -7,7 +7,7 @@ This project is building an operational forecast system for the Inaquito station
 Every hourly run does four things:
 
 1. Gets recent INAMHI observations for Inaquito.
-2. Gets ECMWF forecast data near the station.
+2. Gets ECMWF forecast data near the station, using the AWS mirror by default to avoid direct-portal rate limits.
 3. Applies a local correction so the ECMWF forecast is adjusted to the station behavior.
 4. Saves the forecast, the web page, and the verification data needed to improve future runs.
 
@@ -46,6 +46,8 @@ The current ECMWF predictors used directly are:
 - `mx2t3`
 - `2t`
 - `mn2t3`
+
+The workflow sets `ECMWF_SOURCE=aws`. If AWS has a temporary problem, the script can be run with another source such as `azure`, `google`, or `ecmwf`, but the direct `ecmwf` source can hit HTTP 429 when the open-data portal is busy.
 
 The script still downloads and stores other INAMHI observation columns in `merged_data_export.csv`, such as humidity, precipitation, pressure, and radiation. They are not yet used in the forecast correction model. They should be added deliberately after the verification archive is stable.
 
