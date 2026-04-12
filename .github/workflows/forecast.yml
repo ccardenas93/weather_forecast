@@ -21,6 +21,9 @@ jobs:
     timeout-minutes: 55
     env:
       FETCH_DAYS: "730"
+      FETCH_RETRIES: "3"
+      FETCH_RETRY_SECONDS: "20"
+      ALLOW_STALE_OBS: "1"
       TARGET_COLUMN: "TEMPERATURA AIRE PROM"
       BIAS_DECAY_HOURS: "36"
       ECMWF_RUN_HOUR: "6"

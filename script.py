@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,9 @@ import cfgrib
 
 
 FETCH_DAYS = int(os.getenv("FETCH_DAYS", "730"))
+FETCH_RETRIES = int(os.getenv("FETCH_RETRIES", "3"))
+FETCH_RETRY_SECONDS = float(os.getenv("FETCH_RETRY_SECONDS", "20"))
+ALLOW_STALE_OBS = os.getenv("ALLOW_STALE_OBS", "1").lower() not in {"0", "false", "no"}
 BIAS_DECAY_HOURS = float(os.getenv("BIAS_DECAY_HOURS", "36"))
 ECMWF_RUN_HOUR = int(os.getenv("ECMWF_RUN_HOUR", "6"))
 ECMWF_STEPS = [
@@ -70,24 +74,37 @@ def fetch_weather_data(start_date, end_date, station_id, table_names):
         "start_date": start_date,
         "end_date": end_date,
     }
-    response = requests.post(url, json=payload, timeout=120)
-    if response.status_code != 200:
-        raise RuntimeError(f"Failed to retrieve data: {response.status_code}")
+    last_error = None
+    for attempt in range(1, FETCH_RETRIES + 1):
+        try:
+            response = requests.post(url, json=payload, timeout=120)
+            if response.status_code != 200:
+                raise RuntimeError(f"INAMHI returned HTTP {response.status_code}")
 
-    flattened_data = []
-    for measurement in response.json():
-        code = measurement.get("nemonico")
-        variable_name = NAME_MAP.get(code, code)
-        for entry in measurement.get("data", []):
-            flattened_data.append({
-                "fecha": entry["fecha_toma_dato"],
-                variable_name: entry["valor"],
-            })
+            flattened_data = []
+            for measurement in response.json():
+                code = measurement.get("nemonico")
+                variable_name = NAME_MAP.get(code, code)
+                for entry in measurement.get("data", []):
+                    flattened_data.append({
+                        "fecha": entry["fecha_toma_dato"],
+                        variable_name: entry["valor"],
+                    })
 
-    if not flattened_data:
-        raise RuntimeError(f"No weather data returned from {start_date} to {end_date}")
+            if not flattened_data:
+                raise RuntimeError(f"No weather data returned from {start_date} to {end_date}")
 
-    return pd.DataFrame(flattened_data).groupby("fecha").first().reset_index()
+            return pd.DataFrame(flattened_data).groupby("fecha").first().reset_index()
+        except (requests.RequestException, RuntimeError) as exc:
+            last_error = exc
+            if attempt < FETCH_RETRIES:
+                print(
+                    f"INAMHI fetch attempt {attempt}/{FETCH_RETRIES} failed: {exc}; retrying",
+                    flush=True,
+                )
+                time.sleep(FETCH_RETRY_SECONDS)
+
+    raise RuntimeError(f"Failed to retrieve INAMHI data after {FETCH_RETRIES} attempt(s): {last_error}")
 
 
 def load_station_target(raw_data_path):
@@ -313,8 +330,16 @@ def main():
     )
 
     print(f"Fetching INAMHI observations from {start_date} to {end_date}", flush=True)
-    raw_weather = fetch_weather_data(start_date, end_date, STATION_ID, TABLE_NAMES)
-    raw_weather.to_csv(RAW_DATA_PATH, index=False)
+    try:
+        raw_weather = fetch_weather_data(start_date, end_date, STATION_ID, TABLE_NAMES)
+        raw_weather.to_csv(RAW_DATA_PATH, index=False)
+    except RuntimeError as exc:
+        if not ALLOW_STALE_OBS or not RAW_DATA_PATH.exists():
+            raise
+        print(
+            f"WARNING: {exc}. Using cached observations from {RAW_DATA_PATH} so the forecast can continue.",
+            flush=True,
+        )
 
     target = load_station_target(RAW_DATA_PATH)
     print(
