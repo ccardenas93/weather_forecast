@@ -29,7 +29,14 @@ ECMWF_PARAMS = [
     for param in os.getenv("ECMWF_PARAMS", "mx2t3,2t,mn2t3").split(",")
     if param.strip()
 ]
-ECMWF_SOURCE = os.getenv("ECMWF_SOURCE", "aws")
+ECMWF_SOURCES = [
+    source.strip()
+    for source in os.getenv("ECMWF_SOURCES", os.getenv("ECMWF_SOURCE", "azure,google,aws")).split(",")
+    if source.strip()
+]
+if not ECMWF_SOURCES:
+    ECMWF_SOURCES = ["azure", "google", "aws"]
+ECMWF_SOURCE_RETRY_SECONDS = float(os.getenv("ECMWF_SOURCE_RETRY_SECONDS", "15"))
 
 STATION_ID = 63777
 STATION_NAME = "Inaquito"
@@ -219,8 +226,11 @@ def extract_station_series(ds, variable, value_column):
     return series
 
 
-def download_ecmwf_temperatures():
-    client = Client(source=ECMWF_SOURCE)
+def retrieve_ecmwf_grib(source):
+    if ECMWF_GRIB_PATH.exists():
+        ECMWF_GRIB_PATH.unlink()
+
+    client = Client(source=source)
     client.retrieve(
         time=ECMWF_RUN_HOUR,
         type="fc",
@@ -230,6 +240,8 @@ def download_ecmwf_temperatures():
         target=str(ECMWF_GRIB_PATH),
     )
 
+
+def read_ecmwf_temperature_grib():
     datasets = cfgrib.open_datasets(str(ECMWF_GRIB_PATH))
     forecast = None
     found_params = set()
@@ -275,6 +287,41 @@ def download_ecmwf_temperatures():
     finally:
         for ds in datasets:
             ds.close()
+
+
+def cleanup_ecmwf_grib():
+    if ECMWF_GRIB_PATH.exists():
+        try:
+            ECMWF_GRIB_PATH.unlink()
+        except OSError as exc:
+            print(f"WARNING: Could not remove partial ECMWF GRIB {ECMWF_GRIB_PATH}: {exc}", flush=True)
+
+
+def download_ecmwf_temperatures():
+    last_error = None
+    for source_index, source in enumerate(ECMWF_SOURCES, start=1):
+        try:
+            print(
+                f"Trying ECMWF source {source} ({source_index}/{len(ECMWF_SOURCES)})",
+                flush=True,
+            )
+            retrieve_ecmwf_grib(source)
+            forecast = read_ecmwf_temperature_grib()
+            forecast.attrs["ecmwf_source"] = source
+            return forecast
+        except Exception as exc:
+            last_error = exc
+            print(f"ECMWF source {source} failed: {exc}", flush=True)
+            cleanup_ecmwf_grib()
+            if source_index < len(ECMWF_SOURCES):
+                print(
+                    f"Retrying ECMWF from next source in {ECMWF_SOURCE_RETRY_SECONDS:.0f} seconds",
+                    flush=True,
+                )
+                time.sleep(ECMWF_SOURCE_RETRY_SECONDS)
+
+    source_list = ", ".join(ECMWF_SOURCES)
+    raise RuntimeError(f"Failed to retrieve ECMWF forecast from sources: {source_list}") from last_error
 
 
 def align_observations_to_forecast(forecast, station_targets, observed_column):
@@ -826,10 +873,11 @@ def main():
 
     print(
         f"Retrieving ECMWF max/prom/min 2m temperature forecast for {STATION_NAME} "
-        f"from {ECMWF_SOURCE}",
+        f"from sources {', '.join(ECMWF_SOURCES)}",
         flush=True,
     )
     raw_forecast = download_ecmwf_temperatures()
+    print(f"Using ECMWF source {raw_forecast.attrs.get('ecmwf_source')}", flush=True)
     bias_by_target = {
         target_key: compute_local_bias(
             raw_forecast,

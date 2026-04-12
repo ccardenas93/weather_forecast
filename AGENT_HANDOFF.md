@@ -26,7 +26,7 @@ The workflow runs hourly and on pushes to `script.py`, `.github/workflows/foreca
    - `mx2t3`: max 2 m temperature in the previous 3 hours
    - `2t`: instantaneous 2 m temperature
    - `mn2t3`: min 2 m temperature in the previous 3 hours
-   - Default source is `aws` via `ECMWF_SOURCE=aws`, because the direct ECMWF portal can return HTTP 429 under load.
+   - Default sources are `azure,google,aws` via `ECMWF_SOURCES`, because individual mirrors can rate-limit under load.
 5. Applies local bias correction:
    - Uses verified historical lead-time bias when enough samples exist.
    - Falls back to the latest observation/current-run overlap with exponential decay.
@@ -130,7 +130,7 @@ curl -s --max-time 20 'https://api.github.com/repos/ccardenas93/weather_forecast
 If a run fails, inspect whether it failed from external data availability or code:
 
 - INAMHI failure usually shows HTTP 502 or no data. The script should continue with cached observations if a cache exists.
-- ECMWF failure can happen from open-data portal limits or a missing parameter. If logs show HTTP 429, keep `ECMWF_SOURCE=aws` or try `azure`/`google`; avoid defaulting back to direct `ecmwf`.
+- ECMWF failure can happen from open-data portal limits or a missing parameter. If logs show HTTP 429 or S3 `SlowDown`, keep `ECMWF_SOURCES=azure,google,aws`; avoid defaulting back to direct `ecmwf` unless diagnosing manually.
 - Code failures will show Python tracebacks in `script.py`; fix those first.
 
 ## Next Engineering Steps
