@@ -18,20 +18,66 @@ BIAS_DECAY_HOURS = float(os.getenv("BIAS_DECAY_HOURS", "36"))
 ECMWF_RUN_HOUR = int(os.getenv("ECMWF_RUN_HOUR", "6"))
 ECMWF_STEPS = [
     int(step.strip())
-    for step in os.getenv("ECMWF_STEPS", "0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48").split(",")
+    for step in os.getenv("ECMWF_STEPS", "3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48").split(",")
     if step.strip()
+]
+ECMWF_PARAMS = [
+    param.strip()
+    for param in os.getenv("ECMWF_PARAMS", "mx2t3,2t,mn2t3").split(",")
+    if param.strip()
 ]
 
 STATION_ID = 63777
 STATION_NAME = "Inaquito"
 STATION_LAT = -0.178300
 STATION_LON = -78.487700
-TARGET_COLUMN = os.getenv("TARGET_COLUMN", "TEMPERATURA AIRE PROM")
 
 RAW_DATA_PATH = Path("merged_data_export.csv")
 ECMWF_GRIB_PATH = Path("surface_temp_multi.grib2")
 FORECAST_CSV_PATH = Path("forecast_output.csv")
 FORECAST_HTML_PATH = Path("forecast_Inaquito.html")
+
+FORECAST_TARGETS = {
+    "max": {
+        "label": "Max",
+        "station_column": "TEMPERATURA AIRE MAX",
+        "ecmwf_param": "mx2t3",
+        "raw_column": "ecmwf_max_c",
+        "forecast_column": "forecast_max_c",
+        "persistence_column": "persistence_max_c",
+        "lower_column": "forecast_max_lower_c",
+        "upper_column": "forecast_max_upper_c",
+        "bias_column": "bias_correction_max_c",
+    },
+    "prom": {
+        "label": "Prom",
+        "station_column": "TEMPERATURA AIRE PROM",
+        "ecmwf_param": "2t",
+        "raw_column": "ecmwf_prom_c",
+        "forecast_column": "forecast_prom_c",
+        "persistence_column": "persistence_prom_c",
+        "lower_column": "forecast_prom_lower_c",
+        "upper_column": "forecast_prom_upper_c",
+        "bias_column": "bias_correction_prom_c",
+    },
+    "min": {
+        "label": "Min",
+        "station_column": "TEMPERATURA AIRE MIN",
+        "ecmwf_param": "mn2t3",
+        "raw_column": "ecmwf_min_c",
+        "forecast_column": "forecast_min_c",
+        "persistence_column": "persistence_min_c",
+        "lower_column": "forecast_min_lower_c",
+        "upper_column": "forecast_min_upper_c",
+        "bias_column": "bias_correction_min_c",
+    },
+}
+DEFAULT_TARGET_KEY = "prom"
+ECMWF_VARIABLE_CANDIDATES = {
+    "2t": ["t2m", "2t"],
+    "mx2t3": ["mx2t3", "mx2t"],
+    "mn2t3": ["mn2t3", "mn2t"],
+}
 
 TABLE_NAMES = [
     "009010101h", "009010201h", "009010401h",  # HUMEDAD RELATIVA DEL AIRE (MAX, MIN, PROM)
@@ -107,11 +153,16 @@ def fetch_weather_data(start_date, end_date, station_id, table_names):
     raise RuntimeError(f"Failed to retrieve INAMHI data after {FETCH_RETRIES} attempt(s): {last_error}")
 
 
-def load_station_target(raw_data_path):
+def load_station_targets(raw_data_path):
     data = pd.read_csv(raw_data_path)
     data = data.loc[:, ~data.columns.str.contains("^Unnamed")]
-    if TARGET_COLUMN not in data.columns:
-        raise RuntimeError(f"Missing required target column: {TARGET_COLUMN}")
+    missing_columns = [
+        spec["station_column"]
+        for spec in FORECAST_TARGETS.values()
+        if spec["station_column"] not in data.columns
+    ]
+    if missing_columns:
+        raise RuntimeError(f"Missing required target columns: {', '.join(missing_columns)}")
 
     data["fecha"] = pd.to_datetime(data["fecha"], utc=True).dt.tz_convert(None)
     data = data.sort_values("fecha").set_index("fecha")
@@ -119,72 +170,124 @@ def load_station_target(raw_data_path):
         data[column] = pd.to_numeric(data[column], errors="coerce")
 
     hourly = data.asfreq("h")
-    target = hourly[TARGET_COLUMN].interpolate(method="time", limit=3)
-    target = target.ffill(limit=3).bfill(limit=3).dropna()
-    if target.empty:
-        raise RuntimeError(f"No usable observations for {TARGET_COLUMN}")
+    targets = {}
+    for key, spec in FORECAST_TARGETS.items():
+        target = hourly[spec["station_column"]].interpolate(method="time", limit=3)
+        target = target.ffill(limit=3).bfill(limit=3)
+        targets[f"observed_{key}_c"] = target
 
-    return target
+    targets = pd.DataFrame(targets).dropna(how="all")
+    if targets.empty:
+        raise RuntimeError("No usable temperature observations for max/prom/min targets")
+
+    return targets
 
 
-def download_ecmwf_temperature():
+def find_ecmwf_variable(ds, param):
+    for variable in ECMWF_VARIABLE_CANDIDATES.get(param, [param]):
+        if variable in ds.data_vars:
+            return variable
+    for variable, data_array in ds.data_vars.items():
+        if data_array.attrs.get("GRIB_shortName") == param:
+            return variable
+    return None
+
+
+def extract_station_series(ds, variable, value_column):
+    temperature = ds[variable].sel(latitude=STATION_LAT, longitude=STATION_LON, method="nearest")
+    values_c = np.asarray(temperature.values).reshape(-1) - 273.15
+    valid_times = pd.to_datetime(np.asarray(ds["valid_time"].values).reshape(-1))
+
+    series = pd.DataFrame({
+        "valid_time": valid_times,
+        value_column: values_c,
+    }).dropna()
+    series = series.sort_values("valid_time").drop_duplicates("valid_time")
+
+    if "step" in ds.coords:
+        steps = pd.to_timedelta(np.asarray(ds["step"].values).reshape(-1)).total_seconds() / 3600
+        if len(steps) == len(series):
+            series["lead_hours"] = steps
+
+    return series
+
+
+def download_ecmwf_temperatures():
     client = Client(source="ecmwf")
     client.retrieve(
         time=ECMWF_RUN_HOUR,
         type="fc",
         step=ECMWF_STEPS,
-        param="2t",
+        param=ECMWF_PARAMS,
         stream="oper",
         target=str(ECMWF_GRIB_PATH),
     )
 
-    ds = cfgrib.open_dataset(str(ECMWF_GRIB_PATH))
+    datasets = cfgrib.open_datasets(str(ECMWF_GRIB_PATH))
+    forecast = None
+    found_params = set()
     try:
-        temperature = ds["t2m"].sel(latitude=STATION_LAT, longitude=STATION_LON, method="nearest")
-        values_c = np.asarray(temperature.values).reshape(-1) - 273.15
-        valid_times = pd.to_datetime(np.asarray(ds["valid_time"].values).reshape(-1))
+        for ds in datasets:
+            for key, spec in FORECAST_TARGETS.items():
+                param = spec["ecmwf_param"]
+                if param in found_params:
+                    continue
+                variable = find_ecmwf_variable(ds, param)
+                if not variable:
+                    continue
+                series = extract_station_series(ds, variable, spec["raw_column"])
+                if series.empty:
+                    continue
 
-        forecast = pd.DataFrame({
-            "valid_time": valid_times,
-            "ecmwf_2t_c": values_c,
-        }).dropna()
+                merge_columns = ["valid_time", spec["raw_column"]]
+                if "lead_hours" in series.columns:
+                    merge_columns.append("lead_hours")
+                series = series[merge_columns]
+                if forecast is None:
+                    forecast = series
+                else:
+                    forecast = forecast.merge(series, on="valid_time", how="outer")
+                    if "lead_hours_x" in forecast.columns and "lead_hours_y" in forecast.columns:
+                        forecast["lead_hours"] = forecast["lead_hours_x"].combine_first(forecast["lead_hours_y"])
+                        forecast = forecast.drop(columns=["lead_hours_x", "lead_hours_y"])
+                found_params.add(param)
+
+        required_params = {spec["ecmwf_param"] for spec in FORECAST_TARGETS.values()}
+        missing_params = sorted(required_params - found_params)
+        if missing_params:
+            raise RuntimeError(f"ECMWF forecast missing required parameters: {', '.join(missing_params)}")
+        if forecast is None or forecast.empty:
+            raise RuntimeError("ECMWF returned no usable temperature forecast values")
+
         forecast = forecast.sort_values("valid_time").drop_duplicates("valid_time")
-
-        if "step" in ds.coords:
-            steps = pd.to_timedelta(np.asarray(ds["step"].values).reshape(-1)).total_seconds() / 3600
-            if len(steps) == len(forecast):
-                forecast["lead_hours"] = steps
-            else:
-                forecast["lead_hours"] = (
-                    forecast["valid_time"] - forecast["valid_time"].min()
-                ).dt.total_seconds() / 3600
-        else:
+        if "lead_hours" not in forecast.columns:
             forecast["lead_hours"] = (
                 forecast["valid_time"] - forecast["valid_time"].min()
             ).dt.total_seconds() / 3600
-
-        if forecast.empty:
-            raise RuntimeError("ECMWF returned no usable 2t forecast values")
         return forecast
     finally:
-        ds.close()
+        for ds in datasets:
+            ds.close()
 
 
-def align_observations_to_forecast(forecast, target):
-    observations = target.rename("observed_temp_c").reset_index()
+def align_observations_to_forecast(forecast, station_targets, observed_column):
+    observations = station_targets[[observed_column]].rename(columns={observed_column: "observed_temp_c"}).reset_index()
     observations = observations.rename(columns={observations.columns[0]: "valid_time"})
     return forecast.merge(observations, on="valid_time", how="left")
 
 
-def compute_local_bias(forecast, target):
+def compute_local_bias(forecast, station_targets, target_key):
+    spec = FORECAST_TARGETS[target_key]
+    observed_column = f"observed_{target_key}_c"
+    target = station_targets[observed_column].dropna()
     latest_observation_time = target.index.max()
     latest_observation_c = float(target.loc[latest_observation_time])
 
-    overlap = align_observations_to_forecast(forecast, target)
+    overlap = align_observations_to_forecast(forecast, station_targets, observed_column)
     overlap = overlap[overlap["valid_time"] <= latest_observation_time].dropna(subset=["observed_temp_c"])
 
     if not overlap.empty:
-        bias_samples = overlap["observed_temp_c"] - overlap["ecmwf_2t_c"]
+        bias_samples = overlap["observed_temp_c"] - overlap[spec["raw_column"]]
         bias_c = float(bias_samples.median())
         raw_mae_c = float(bias_samples.abs().mean())
         raw_rmse_c = float(np.sqrt(np.mean(np.square(bias_samples))))
@@ -195,7 +298,7 @@ def compute_local_bias(forecast, target):
         nearest_forecast = forecast.loc[nearest_index]
         hours_apart = abs((nearest_forecast["valid_time"] - latest_observation_time).total_seconds()) / 3600
         if hours_apart <= 6:
-            bias_c = latest_observation_c - float(nearest_forecast["ecmwf_2t_c"])
+            bias_c = latest_observation_c - float(nearest_forecast[spec["raw_column"]])
             source = f"latest observation vs nearest ECMWF valid time ({hours_apart:.1f} h apart)"
         else:
             bias_c = 0.0
@@ -215,120 +318,194 @@ def compute_local_bias(forecast, target):
     }
 
 
-def apply_bias_correction(forecast, bias_info):
+def apply_bias_correction(forecast, bias_by_target):
     corrected = forecast.copy()
-    hours_after_latest_obs = (
-        corrected["valid_time"] - bias_info["latest_observation_time"]
-    ).dt.total_seconds() / 3600
-    hours_after_latest_obs = hours_after_latest_obs.clip(lower=0)
+    for target_key, bias_info in bias_by_target.items():
+        spec = FORECAST_TARGETS[target_key]
+        hours_after_latest_obs = (
+            corrected["valid_time"] - bias_info["latest_observation_time"]
+        ).dt.total_seconds() / 3600
+        hours_after_latest_obs = hours_after_latest_obs.clip(lower=0)
 
-    decay = np.exp(-hours_after_latest_obs / BIAS_DECAY_HOURS)
-    corrected["bias_correction_c"] = bias_info["bias_c"] * decay
-    corrected["forecast_temp_c"] = corrected["ecmwf_2t_c"] + corrected["bias_correction_c"]
-    corrected["persistence_temp_c"] = bias_info["latest_observation_c"]
-    corrected["uncertainty_c"] = bias_info["uncertainty_c"]
-    corrected["forecast_lower_c"] = corrected["forecast_temp_c"] - corrected["uncertainty_c"]
-    corrected["forecast_upper_c"] = corrected["forecast_temp_c"] + corrected["uncertainty_c"]
+        decay = np.exp(-hours_after_latest_obs / BIAS_DECAY_HOURS)
+        corrected[spec["bias_column"]] = bias_info["bias_c"] * decay
+        corrected[spec["forecast_column"]] = corrected[spec["raw_column"]] + corrected[spec["bias_column"]]
+        corrected[spec["persistence_column"]] = bias_info["latest_observation_c"]
+        corrected[f"uncertainty_{target_key}_c"] = bias_info["uncertainty_c"]
+        corrected[spec["lower_column"]] = corrected[spec["forecast_column"]] - bias_info["uncertainty_c"]
+        corrected[spec["upper_column"]] = corrected[spec["forecast_column"]] + bias_info["uncertainty_c"]
     return corrected
 
 
-def build_plot(target, forecast, bias_info):
-    future = forecast[forecast["valid_time"] > bias_info["latest_observation_time"]].copy()
-    if future.empty:
-        future = forecast.copy()
-
+def diagnostic_text(bias_info):
     if pd.notna(bias_info["raw_rmse_c"]):
         rmse_text = f"{bias_info['raw_rmse_c']:.2f} C"
     else:
         rmse_text = "n/a"
-    diagnostic = (
+    return (
         f"Bias correction: {bias_info['bias_c']:.2f} C ({bias_info['bias_source']}). "
         f"Raw ECMWF recent RMSE: {rmse_text}"
     )
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=target.index[-120:],
-        y=target.iloc[-120:],
-        mode="lines",
-        name=f"Observed {TARGET_COLUMN}",
-        line=dict(color="#1f77b4"),
-    ))
-    fig.add_trace(go.Scatter(
-        x=forecast["valid_time"],
-        y=forecast["ecmwf_2t_c"],
-        mode="lines+markers",
-        name="Raw ECMWF 2m temperature",
-        line=dict(color="#2ca02c", dash="dash"),
-    ))
-    fig.add_trace(go.Scatter(
-        x=future["valid_time"],
-        y=future["forecast_upper_c"],
-        mode="lines",
-        name="Forecast upper band",
-        showlegend=False,
-        line=dict(color="rgba(214, 39, 40, 0.15)"),
-    ))
-    fig.add_trace(go.Scatter(
-        x=future["valid_time"],
-        y=future["forecast_lower_c"],
-        mode="lines",
-        name="Forecast uncertainty band",
-        fill="tonexty",
-        fillcolor="rgba(214, 39, 40, 0.15)",
-        line=dict(color="rgba(214, 39, 40, 0.15)"),
-    ))
-    fig.add_trace(go.Scatter(
-        x=future["valid_time"],
-        y=future["forecast_temp_c"],
-        mode="lines+markers",
-        name="Bias-corrected ECMWF forecast",
-        line=dict(color="#d62728"),
-    ))
-    fig.add_trace(go.Scatter(
-        x=future["valid_time"],
-        y=future["persistence_temp_c"],
-        mode="lines",
-        name="Persistence baseline",
-        line=dict(color="#7f7f7f", dash="dot"),
-    ))
 
-    latest_observation_time = bias_info["latest_observation_time"].to_pydatetime()
-    fig.add_shape(
-        type="line",
-        x0=latest_observation_time,
-        x1=latest_observation_time,
-        y0=0,
-        y1=1,
-        xref="x",
-        yref="paper",
-        line=dict(color="#444444", dash="dot"),
+def target_title(target_key):
+    spec = FORECAST_TARGETS[target_key]
+    return (
+        f"{STATION_NAME} {spec['label']} Temperature Forecast: "
+        "ECMWF with Local Bias Correction"
     )
+
+
+def target_annotations(target_key, bias_info):
+    latest_observation_time = bias_info["latest_observation_time"].to_pydatetime()
+    return [
+        dict(
+            text="latest observation",
+            x=latest_observation_time,
+            y=1,
+            xref="x",
+            yref="paper",
+            showarrow=False,
+            xanchor="left",
+            yanchor="bottom",
+        ),
+        dict(
+            text=diagnostic_text(bias_info),
+            xref="paper",
+            yref="paper",
+            x=0,
+            y=-0.18,
+            showarrow=False,
+            align="left",
+        ),
+    ]
+
+
+def build_plot(station_targets, forecast, bias_by_target):
+    target_order = ["max", "prom", "min"]
+    default_index = target_order.index(DEFAULT_TARGET_KEY)
+    fig = go.Figure()
+
+    for target_index, target_key in enumerate(target_order):
+        spec = FORECAST_TARGETS[target_key]
+        bias_info = bias_by_target[target_key]
+        observed_column = f"observed_{target_key}_c"
+        observed = station_targets[observed_column].dropna()
+        future = forecast[forecast["valid_time"] > bias_info["latest_observation_time"]].copy()
+        if future.empty:
+            future = forecast.copy()
+
+        visible = target_index == default_index
+        plot_values = pd.concat([
+            observed.iloc[-120:],
+            forecast[spec["raw_column"]],
+            future[spec["lower_column"]],
+            future[spec["upper_column"]],
+            future[spec["forecast_column"]],
+        ]).dropna()
+        if plot_values.empty:
+            marker_min, marker_max = 0, 1
+        else:
+            marker_min, marker_max = float(plot_values.min()), float(plot_values.max())
+        latest_observation_time = bias_info["latest_observation_time"].to_pydatetime()
+
+        fig.add_trace(go.Scatter(
+            x=observed.index[-120:],
+            y=observed.iloc[-120:],
+            mode="lines",
+            name=f"Observed {spec['label']}",
+            visible=visible,
+            line=dict(color="#1f77b4"),
+        ))
+        fig.add_trace(go.Scatter(
+            x=forecast["valid_time"],
+            y=forecast[spec["raw_column"]],
+            mode="lines+markers",
+            name=f"Raw ECMWF {spec['label']}",
+            visible=visible,
+            line=dict(color="#2ca02c", dash="dash"),
+        ))
+        fig.add_trace(go.Scatter(
+            x=future["valid_time"],
+            y=future[spec["upper_column"]],
+            mode="lines",
+            name=f"{spec['label']} upper band",
+            visible=visible,
+            showlegend=False,
+            line=dict(color="rgba(214, 39, 40, 0.15)"),
+        ))
+        fig.add_trace(go.Scatter(
+            x=future["valid_time"],
+            y=future[spec["lower_column"]],
+            mode="lines",
+            name=f"{spec['label']} uncertainty band",
+            visible=visible,
+            fill="tonexty",
+            fillcolor="rgba(214, 39, 40, 0.15)",
+            line=dict(color="rgba(214, 39, 40, 0.15)"),
+        ))
+        fig.add_trace(go.Scatter(
+            x=future["valid_time"],
+            y=future[spec["forecast_column"]],
+            mode="lines+markers",
+            name=f"Bias-corrected {spec['label']}",
+            visible=visible,
+            line=dict(color="#d62728"),
+        ))
+        fig.add_trace(go.Scatter(
+            x=future["valid_time"],
+            y=future[spec["persistence_column"]],
+            mode="lines",
+            name=f"{spec['label']} persistence",
+            visible=visible,
+            line=dict(color="#7f7f7f", dash="dot"),
+        ))
+        fig.add_trace(go.Scatter(
+            x=[latest_observation_time, latest_observation_time],
+            y=[marker_min, marker_max],
+            mode="lines",
+            name="latest observation",
+            visible=visible,
+            showlegend=False,
+            line=dict(color="#444444", dash="dot"),
+        ))
+
+    buttons = []
+    traces_per_target = 7
+    for target_index, target_key in enumerate(target_order):
+        visible = [False] * len(fig.data)
+        start = target_index * traces_per_target
+        for trace_index in range(start, start + traces_per_target):
+            visible[trace_index] = True
+        buttons.append({
+            "label": FORECAST_TARGETS[target_key]["label"],
+            "method": "update",
+            "args": [
+                {"visible": visible},
+                {
+                    "title": target_title(target_key),
+                    "annotations": target_annotations(target_key, bias_by_target[target_key]),
+                },
+            ],
+        })
+
     fig.update_layout(
-        title=f"{STATION_NAME} Temperature Forecast: ECMWF with Local Bias Correction",
+        title=target_title(DEFAULT_TARGET_KEY),
         xaxis_title="UTC time",
         yaxis_title="Temperature (C)",
         legend=dict(x=0.01, y=0.99),
-        annotations=[
-            dict(
-                text="latest observation",
-                x=latest_observation_time,
-                y=1,
-                xref="x",
-                yref="paper",
-                showarrow=False,
-                xanchor="left",
-                yanchor="bottom",
-            ),
-            dict(
-                text=diagnostic,
-                xref="paper",
-                yref="paper",
-                x=0,
-                y=-0.18,
-                showarrow=False,
-                align="left",
-            )
+        annotations=target_annotations(DEFAULT_TARGET_KEY, bias_by_target[DEFAULT_TARGET_KEY]),
+        updatemenus=[
+            {
+                "buttons": buttons,
+                "direction": "right",
+                "showactive": True,
+                "active": default_index,
+                "x": 0,
+                "xanchor": "left",
+                "y": 1.15,
+                "yanchor": "top",
+            }
         ],
         margin=dict(b=110),
     )
@@ -355,23 +532,34 @@ def main():
             flush=True,
         )
 
-    target = load_station_target(RAW_DATA_PATH)
+    station_targets = load_station_targets(RAW_DATA_PATH)
+    latest_observation_time = max(
+        station_targets[f"observed_{target_key}_c"].dropna().index.max()
+        for target_key in FORECAST_TARGETS
+    )
     print(
-        f"Loaded {len(target)} usable hourly {TARGET_COLUMN} observations; "
-        f"latest at {target.index.max()} UTC",
+        f"Loaded {len(station_targets)} usable hourly temperature observations; "
+        f"latest at {latest_observation_time} UTC",
         flush=True,
     )
 
-    print(f"Retrieving ECMWF 2t forecast for {STATION_NAME}", flush=True)
-    raw_forecast = download_ecmwf_temperature()
-    bias_info = compute_local_bias(raw_forecast, target)
-    corrected_forecast = apply_bias_correction(raw_forecast, bias_info)
+    print(f"Retrieving ECMWF max/prom/min 2m temperature forecast for {STATION_NAME}", flush=True)
+    raw_forecast = download_ecmwf_temperatures()
+    bias_by_target = {
+        target_key: compute_local_bias(raw_forecast, station_targets, target_key)
+        for target_key in FORECAST_TARGETS
+    }
+    corrected_forecast = apply_bias_correction(raw_forecast, bias_by_target)
     corrected_forecast.to_csv(FORECAST_CSV_PATH, index=False)
-    build_plot(target, corrected_forecast, bias_info)
+    build_plot(station_targets, corrected_forecast, bias_by_target)
 
+    bias_summary = ", ".join(
+        f"{FORECAST_TARGETS[target_key]['label']}: {bias_info['bias_c']:.2f} C"
+        for target_key, bias_info in bias_by_target.items()
+    )
     print(
         f"Saved {FORECAST_CSV_PATH} and {FORECAST_HTML_PATH}; "
-        f"local bias correction {bias_info['bias_c']:.2f} C",
+        f"local bias corrections {bias_summary}",
         flush=True,
     )
 
