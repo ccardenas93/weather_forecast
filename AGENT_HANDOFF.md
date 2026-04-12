@@ -164,3 +164,39 @@ The system depends on two external live data sources. A red Action is not automa
 - dependency install issue,
 - code exception,
 - git push conflict from hourly Action commits.
+
+## Resume Here Tomorrow
+
+User is pausing on 2026-04-12 and plans to continue in a new conversation.
+
+Latest known good state:
+
+- Latest pushed commit when this note was written: `d9b0152ad Fallback across ECMWF cloud sources`.
+- User reported the workflow is working after the multi-source ECMWF fallback.
+- The system now has Max / Prom / Min tabs and writes forecast archive, verification, and metrics files when the Action produces them.
+- The current forecast should use `ECMWF_SOURCES=azure,google,aws`, not direct `ecmwf`, because direct ECMWF returned HTTP 429 and AWS returned S3 `SlowDown` under load.
+
+When resuming:
+
+1. Run `git pull --rebase origin master` first. The hourly Action may have pushed `Updated forecast data` commits while the user was asleep.
+2. Check whether these files now exist on `master`:
+   - `forecast_archive.csv`
+   - `forecast_verification.csv`
+   - `forecast_metrics.csv`
+3. Check the latest Forecast Automation run status. If it failed, classify it before editing code:
+   - INAMHI outage or stale data,
+   - all ECMWF mirrors unavailable,
+   - missing ECMWF parameter,
+   - Python exception,
+   - git conflict from concurrent hourly commits.
+4. If the run is green, do not make the model more complex yet. First inspect `forecast_metrics.csv`.
+5. Recommended next implementation:
+   - Add stale ECMWF fallback: if all ECMWF sources fail, use the last successful `forecast_output.csv`/archive rows and mark the HTML as stale instead of failing the Action.
+   - Add real tests for archive, verification, metrics, and historical lead-time bias.
+6. Next meteorological upgrades after enough verified samples exist:
+   - Add ECMWF predictors `2d`, `tcc`, `ssrd`, `tp`, `10u`, `10v`, and `sp`/`msl` to the archive.
+   - Add hour-of-day calibration.
+   - Add multi-station support with station metadata.
+   - Only then consider a small MOS/downscaling model. Do not jump to LSTM.
+
+Priority tomorrow: operational robustness first, smarter calibration second, more predictors third.
