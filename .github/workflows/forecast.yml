@@ -25,6 +25,9 @@ jobs:
       FETCH_RETRY_SECONDS: "20"
       ALLOW_STALE_OBS: "1"
       BIAS_DECAY_HOURS: "36"
+      BIAS_TRAINING_DAYS: "90"
+      MIN_BIAS_SAMPLES: "8"
+      ARCHIVE_RETENTION_DAYS: "180"
       ECMWF_RUN_HOUR: "6"
       ECMWF_PARAMS: "mx2t3,2t,mn2t3"
       ECMWF_STEPS: "3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48"
@@ -61,6 +64,7 @@ jobs:
       run: |
         git add merged_data_export.csv forecast_Inaquito.html
         git add forecast_output.csv
+        git add forecast_archive.csv forecast_verification.csv forecast_metrics.csv
         if git diff --staged --quiet; then
           echo "No forecast changes to commit"
         else

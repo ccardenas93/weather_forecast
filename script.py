@@ -15,6 +15,9 @@ FETCH_RETRIES = int(os.getenv("FETCH_RETRIES", "3"))
 FETCH_RETRY_SECONDS = float(os.getenv("FETCH_RETRY_SECONDS", "20"))
 ALLOW_STALE_OBS = os.getenv("ALLOW_STALE_OBS", "1").lower() not in {"0", "false", "no"}
 BIAS_DECAY_HOURS = float(os.getenv("BIAS_DECAY_HOURS", "36"))
+BIAS_TRAINING_DAYS = int(os.getenv("BIAS_TRAINING_DAYS", "90"))
+MIN_BIAS_SAMPLES = int(os.getenv("MIN_BIAS_SAMPLES", "8"))
+ARCHIVE_RETENTION_DAYS = int(os.getenv("ARCHIVE_RETENTION_DAYS", "180"))
 ECMWF_RUN_HOUR = int(os.getenv("ECMWF_RUN_HOUR", "6"))
 ECMWF_STEPS = [
     int(step.strip())
@@ -36,6 +39,9 @@ RAW_DATA_PATH = Path("merged_data_export.csv")
 ECMWF_GRIB_PATH = Path("surface_temp_multi.grib2")
 FORECAST_CSV_PATH = Path("forecast_output.csv")
 FORECAST_HTML_PATH = Path("forecast_Inaquito.html")
+FORECAST_ARCHIVE_PATH = Path("forecast_archive.csv")
+FORECAST_VERIFICATION_PATH = Path("forecast_verification.csv")
+FORECAST_METRICS_PATH = Path("forecast_metrics.csv")
 
 FORECAST_TARGETS = {
     "max": {
@@ -276,7 +282,232 @@ def align_observations_to_forecast(forecast, station_targets, observed_column):
     return forecast.merge(observations, on="valid_time", how="left")
 
 
-def compute_local_bias(forecast, station_targets, target_key):
+def to_utc_naive(timestamp):
+    timestamp = pd.Timestamp(timestamp)
+    if timestamp.tzinfo is None:
+        return timestamp
+    return timestamp.tz_convert(None)
+
+
+def parse_timestamp_column(data, column):
+    if column in data.columns:
+        data[column] = pd.to_datetime(data[column], utc=True, errors="coerce").dt.tz_convert(None)
+    return data
+
+
+def load_forecast_archive(path):
+    if not path.exists():
+        return pd.DataFrame()
+
+    archive = pd.read_csv(path)
+    if archive.empty:
+        return archive
+
+    for column in ["run_time", "valid_time", "latest_observation_time"]:
+        archive = parse_timestamp_column(archive, column)
+
+    numeric_columns = [
+        "station_id",
+        "lead_hours",
+        "raw_forecast_c",
+        "bias_correction_c",
+        "forecast_c",
+        "persistence_c",
+        "forecast_lower_c",
+        "forecast_upper_c",
+        "uncertainty_c",
+        "latest_observation_c",
+    ]
+    for column in numeric_columns:
+        if column in archive.columns:
+            archive[column] = pd.to_numeric(archive[column], errors="coerce")
+
+    return archive
+
+
+def build_forecast_archive_rows(forecast, bias_by_target, run_time):
+    run_time = to_utc_naive(run_time)
+    target_frames = []
+    for target_key, spec in FORECAST_TARGETS.items():
+        bias_info = bias_by_target[target_key]
+        target_forecast = pd.DataFrame({
+            "run_time": run_time,
+            "station_id": STATION_ID,
+            "station_name": STATION_NAME,
+            "target": target_key,
+            "target_label": spec["label"],
+            "ecmwf_param": spec["ecmwf_param"],
+            "valid_time": forecast["valid_time"],
+            "lead_hours": forecast["lead_hours"],
+            "raw_forecast_c": forecast[spec["raw_column"]],
+            "bias_correction_c": forecast[spec["bias_column"]],
+            "forecast_c": forecast[spec["forecast_column"]],
+            "persistence_c": forecast[spec["persistence_column"]],
+            "forecast_lower_c": forecast[spec["lower_column"]],
+            "forecast_upper_c": forecast[spec["upper_column"]],
+            "uncertainty_c": forecast[f"uncertainty_{target_key}_c"],
+            "bias_source": bias_info["bias_source"],
+            "latest_observation_time": bias_info["latest_observation_time"],
+            "latest_observation_c": bias_info["latest_observation_c"],
+        })
+        target_frames.append(target_forecast)
+
+    return pd.concat(target_frames, ignore_index=True)
+
+
+def update_forecast_archive(existing_archive, forecast, bias_by_target, run_time):
+    new_rows = build_forecast_archive_rows(forecast, bias_by_target, run_time)
+    archive = pd.concat([existing_archive, new_rows], ignore_index=True)
+    archive = parse_timestamp_column(archive, "run_time")
+    archive = parse_timestamp_column(archive, "valid_time")
+    archive = parse_timestamp_column(archive, "latest_observation_time")
+
+    cutoff = to_utc_naive(run_time) - pd.Timedelta(days=ARCHIVE_RETENTION_DAYS)
+    archive = archive[archive["run_time"] >= cutoff]
+    archive = archive.drop_duplicates(["run_time", "target", "valid_time"], keep="last")
+    archive = archive.sort_values(["run_time", "target", "valid_time"]).reset_index(drop=True)
+    archive.to_csv(FORECAST_ARCHIVE_PATH, index=False)
+    return archive
+
+
+def station_observations_long(station_targets):
+    observations = []
+    for target_key in FORECAST_TARGETS:
+        observed_column = f"observed_{target_key}_c"
+        target_observations = (
+            station_targets[[observed_column]]
+            .dropna()
+            .rename_axis("valid_time")
+            .reset_index()
+            .rename(columns={observed_column: "observed_c"})
+        )
+        target_observations["target"] = target_key
+        observations.append(target_observations[["target", "valid_time", "observed_c"]])
+
+    return pd.concat(observations, ignore_index=True)
+
+
+def verify_forecast_archive(archive, station_targets):
+    columns = [
+        "run_time",
+        "station_id",
+        "station_name",
+        "target",
+        "target_label",
+        "ecmwf_param",
+        "valid_time",
+        "lead_hours",
+        "raw_forecast_c",
+        "bias_correction_c",
+        "forecast_c",
+        "persistence_c",
+        "forecast_lower_c",
+        "forecast_upper_c",
+        "uncertainty_c",
+        "bias_source",
+        "latest_observation_time",
+        "latest_observation_c",
+        "observed_c",
+        "raw_error_c",
+        "forecast_error_c",
+        "persistence_error_c",
+        "within_band",
+    ]
+    if archive.empty:
+        return pd.DataFrame(columns=columns)
+
+    observations = station_observations_long(station_targets)
+    verified = archive.merge(observations, on=["target", "valid_time"], how="inner")
+    verified = verified.dropna(subset=["observed_c", "raw_forecast_c", "forecast_c"])
+    if verified.empty:
+        return pd.DataFrame(columns=columns)
+
+    verified["raw_error_c"] = verified["raw_forecast_c"] - verified["observed_c"]
+    verified["forecast_error_c"] = verified["forecast_c"] - verified["observed_c"]
+    verified["persistence_error_c"] = verified["persistence_c"] - verified["observed_c"]
+    verified["within_band"] = (
+        (verified["observed_c"] >= verified["forecast_lower_c"])
+        & (verified["observed_c"] <= verified["forecast_upper_c"])
+    )
+    verified = verified.sort_values(["valid_time", "target", "run_time"]).reset_index(drop=True)
+    return verified[columns]
+
+
+def summarize_verification_metrics(verified):
+    columns = [
+        "target",
+        "target_label",
+        "lead_hour",
+        "sample_count",
+        "forecast_bias_c",
+        "forecast_mae_c",
+        "forecast_rmse_c",
+        "raw_bias_c",
+        "raw_mae_c",
+        "raw_rmse_c",
+        "persistence_mae_c",
+        "coverage_rate",
+        "mae_improvement_vs_raw_c",
+        "mae_improvement_vs_persistence_c",
+    ]
+    if verified.empty:
+        return pd.DataFrame(columns=columns)
+
+    scored = verified.dropna(subset=["lead_hours", "forecast_error_c", "raw_error_c"]).copy()
+    if scored.empty:
+        return pd.DataFrame(columns=columns)
+
+    scored["lead_hour"] = scored["lead_hours"].round().astype(int)
+    metrics = scored.groupby(["target", "target_label", "lead_hour"]).agg(
+        sample_count=("forecast_error_c", "count"),
+        forecast_bias_c=("forecast_error_c", "mean"),
+        forecast_mae_c=("forecast_error_c", lambda errors: errors.abs().mean()),
+        forecast_rmse_c=("forecast_error_c", lambda errors: np.sqrt(np.mean(np.square(errors)))),
+        raw_bias_c=("raw_error_c", "mean"),
+        raw_mae_c=("raw_error_c", lambda errors: errors.abs().mean()),
+        raw_rmse_c=("raw_error_c", lambda errors: np.sqrt(np.mean(np.square(errors)))),
+        persistence_mae_c=("persistence_error_c", lambda errors: errors.abs().mean()),
+        coverage_rate=("within_band", "mean"),
+    ).reset_index()
+    metrics["mae_improvement_vs_raw_c"] = metrics["raw_mae_c"] - metrics["forecast_mae_c"]
+    metrics["mae_improvement_vs_persistence_c"] = (
+        metrics["persistence_mae_c"] - metrics["forecast_mae_c"]
+    )
+    return metrics[columns].sort_values(["target", "lead_hour"]).reset_index(drop=True)
+
+
+def historical_bias_profile(verification, target_key, run_time):
+    if verification.empty:
+        return {}, {}, 0
+
+    history = verification[verification["target"] == target_key].copy()
+    if history.empty:
+        return {}, {}, 0
+
+    cutoff = to_utc_naive(run_time) - pd.Timedelta(days=BIAS_TRAINING_DAYS)
+    history = parse_timestamp_column(history, "run_time")
+    history = history[history["run_time"] >= cutoff]
+    history = history.dropna(subset=["lead_hours", "raw_error_c", "forecast_error_c"])
+    if history.empty:
+        return {}, {}, 0
+
+    history["lead_hour"] = history["lead_hours"].round().astype(int)
+    lead_bias = {}
+    lead_uncertainty = {}
+    for lead_hour, group in history.groupby("lead_hour"):
+        if len(group) < MIN_BIAS_SAMPLES:
+            continue
+
+        correction_c = float((-group["raw_error_c"]).median())
+        forecast_abs_error = group["forecast_error_c"].abs()
+        uncertainty_c = float(max(1.2, forecast_abs_error.quantile(0.80)))
+        lead_bias[int(lead_hour)] = correction_c
+        lead_uncertainty[int(lead_hour)] = uncertainty_c
+
+    return lead_bias, lead_uncertainty, len(history)
+
+
+def compute_local_bias(forecast, station_targets, target_key, verification=None, run_time=None):
     spec = FORECAST_TARGETS[target_key]
     observed_column = f"observed_{target_key}_c"
     target = station_targets[observed_column].dropna()
@@ -307,12 +538,30 @@ def compute_local_bias(forecast, station_targets, target_key):
         raw_rmse_c = np.nan
         uncertainty_c = 2.0
 
+    if run_time is None:
+        run_time = pd.Timestamp.now(tz="UTC")
+    if verification is None:
+        verification = pd.DataFrame()
+    lead_bias, lead_uncertainty, historical_sample_count = historical_bias_profile(
+        verification,
+        target_key,
+        run_time,
+    )
+    if lead_bias:
+        source = (
+            f"historical lead-time bias for {len(lead_bias)} lead(s); "
+            f"current fallback from {source}"
+        )
+
     return {
         "bias_c": bias_c,
         "bias_source": source,
         "raw_mae_c": raw_mae_c,
         "raw_rmse_c": raw_rmse_c,
         "uncertainty_c": uncertainty_c,
+        "lead_bias_c": lead_bias,
+        "lead_uncertainty_c": lead_uncertainty,
+        "historical_sample_count": historical_sample_count,
         "latest_observation_time": latest_observation_time,
         "latest_observation_c": latest_observation_c,
     }
@@ -328,12 +577,29 @@ def apply_bias_correction(forecast, bias_by_target):
         hours_after_latest_obs = hours_after_latest_obs.clip(lower=0)
 
         decay = np.exp(-hours_after_latest_obs / BIAS_DECAY_HOURS)
-        corrected[spec["bias_column"]] = bias_info["bias_c"] * decay
+        fallback_bias = bias_info["bias_c"] * decay
+        lead_bias = corrected["lead_hours"].round().map(
+            lambda lead_hour: bias_info["lead_bias_c"].get(int(lead_hour))
+            if pd.notna(lead_hour)
+            else np.nan
+        )
+        lead_bias = pd.to_numeric(lead_bias, errors="coerce")
+        corrected[spec["bias_column"]] = lead_bias.where(lead_bias.notna(), fallback_bias)
         corrected[spec["forecast_column"]] = corrected[spec["raw_column"]] + corrected[spec["bias_column"]]
         corrected[spec["persistence_column"]] = bias_info["latest_observation_c"]
-        corrected[f"uncertainty_{target_key}_c"] = bias_info["uncertainty_c"]
-        corrected[spec["lower_column"]] = corrected[spec["forecast_column"]] - bias_info["uncertainty_c"]
-        corrected[spec["upper_column"]] = corrected[spec["forecast_column"]] + bias_info["uncertainty_c"]
+        lead_uncertainty = corrected["lead_hours"].round().map(
+            lambda lead_hour: bias_info["lead_uncertainty_c"].get(int(lead_hour))
+            if pd.notna(lead_hour)
+            else np.nan
+        )
+        uncertainty_column = f"uncertainty_{target_key}_c"
+        lead_uncertainty = pd.to_numeric(lead_uncertainty, errors="coerce")
+        corrected[uncertainty_column] = lead_uncertainty.where(
+            lead_uncertainty.notna(),
+            bias_info["uncertainty_c"],
+        )
+        corrected[spec["lower_column"]] = corrected[spec["forecast_column"]] - corrected[uncertainty_column]
+        corrected[spec["upper_column"]] = corrected[spec["forecast_column"]] + corrected[uncertainty_column]
     return corrected
 
 
@@ -342,9 +608,15 @@ def diagnostic_text(bias_info):
         rmse_text = f"{bias_info['raw_rmse_c']:.2f} C"
     else:
         rmse_text = "n/a"
+    history_text = ""
+    if bias_info["historical_sample_count"]:
+        history_text = (
+            f" Verified archive samples: {bias_info['historical_sample_count']}; "
+            f"calibrated leads: {len(bias_info['lead_bias_c'])}."
+        )
     return (
         f"Bias correction: {bias_info['bias_c']:.2f} C ({bias_info['bias_source']}). "
-        f"Raw ECMWF recent RMSE: {rmse_text}"
+        f"Raw ECMWF recent RMSE: {rmse_text}.{history_text}"
     )
 
 
@@ -513,8 +785,8 @@ def build_plot(station_targets, forecast, bias_by_target):
 
 
 def main():
-    end_timestamp = pd.Timestamp.now(tz="UTC")
-    end_date = os.getenv("END_DATE", end_timestamp.strftime("%Y-%m-%dT%H:%M:%S"))
+    run_time = pd.Timestamp.now(tz="UTC")
+    end_date = os.getenv("END_DATE", run_time.strftime("%Y-%m-%dT%H:%M:%S"))
     start_date = os.getenv(
         "START_DATE",
         (pd.Timestamp(end_date) - pd.Timedelta(days=FETCH_DAYS)).strftime("%Y-%m-%dT%H:%M:%S"),
@@ -543,15 +815,40 @@ def main():
         flush=True,
     )
 
+    forecast_archive = load_forecast_archive(FORECAST_ARCHIVE_PATH)
+    historical_verification = verify_forecast_archive(forecast_archive, station_targets)
+    print(
+        f"Loaded {len(forecast_archive)} archived forecast row(s); "
+        f"{len(historical_verification)} verified row(s) available for calibration",
+        flush=True,
+    )
+
     print(f"Retrieving ECMWF max/prom/min 2m temperature forecast for {STATION_NAME}", flush=True)
     raw_forecast = download_ecmwf_temperatures()
     bias_by_target = {
-        target_key: compute_local_bias(raw_forecast, station_targets, target_key)
+        target_key: compute_local_bias(
+            raw_forecast,
+            station_targets,
+            target_key,
+            verification=historical_verification,
+            run_time=run_time,
+        )
         for target_key in FORECAST_TARGETS
     }
     corrected_forecast = apply_bias_correction(raw_forecast, bias_by_target)
     corrected_forecast.to_csv(FORECAST_CSV_PATH, index=False)
     build_plot(station_targets, corrected_forecast, bias_by_target)
+
+    forecast_archive = update_forecast_archive(
+        forecast_archive,
+        corrected_forecast,
+        bias_by_target,
+        run_time,
+    )
+    verification = verify_forecast_archive(forecast_archive, station_targets)
+    metrics = summarize_verification_metrics(verification)
+    verification.to_csv(FORECAST_VERIFICATION_PATH, index=False)
+    metrics.to_csv(FORECAST_METRICS_PATH, index=False)
 
     bias_summary = ", ".join(
         f"{FORECAST_TARGETS[target_key]['label']}: {bias_info['bias_c']:.2f} C"
@@ -559,7 +856,8 @@ def main():
     )
     print(
         f"Saved {FORECAST_CSV_PATH} and {FORECAST_HTML_PATH}; "
-        f"local bias corrections {bias_summary}",
+        f"archived {len(forecast_archive)} row(s), verified {len(verification)} row(s), "
+        f"metrics {len(metrics)} row(s); local bias corrections {bias_summary}",
         flush=True,
     )
 
