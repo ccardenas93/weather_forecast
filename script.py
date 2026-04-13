@@ -1,10 +1,12 @@
 import os
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import requests
 from ecmwf.opendata import Client
 import cfgrib
@@ -50,6 +52,8 @@ FORECAST_HTML_PATH = Path("forecast_Inaquito.html")
 FORECAST_ARCHIVE_PATH = Path("forecast_archive.csv")
 FORECAST_VERIFICATION_PATH = Path("forecast_verification.csv")
 FORECAST_METRICS_PATH = Path("forecast_metrics.csv")
+SYSTEM_STATUS_PATH = Path("SYSTEM_STATUS.md")
+METRICS_HTML_PATH = Path("forecast_metrics.html")
 
 FORECAST_TARGETS = {
     "max": {
@@ -524,6 +528,354 @@ def summarize_verification_metrics(verified):
     return metrics[columns].sort_values(["target", "lead_hour"]).reset_index(drop=True)
 
 
+def weighted_summary(metrics):
+    if metrics.empty:
+        return {
+            "rows": 0,
+            "samples": 0,
+            "forecast_mae_c": np.nan,
+            "raw_mae_c": np.nan,
+            "persistence_mae_c": np.nan,
+            "coverage_rate": np.nan,
+            "mae_improvement_vs_raw_c": np.nan,
+            "mae_improvement_vs_persistence_c": np.nan,
+            "leads_better_than_raw": 0,
+            "leads_better_than_persistence": 0,
+        }
+
+    weights = metrics["sample_count"]
+    sample_count = float(weights.sum())
+    if sample_count == 0:
+        return weighted_summary(pd.DataFrame())
+
+    return {
+        "rows": int(len(metrics)),
+        "samples": int(sample_count),
+        "forecast_mae_c": float((metrics["forecast_mae_c"] * weights).sum() / sample_count),
+        "raw_mae_c": float((metrics["raw_mae_c"] * weights).sum() / sample_count),
+        "persistence_mae_c": float((metrics["persistence_mae_c"] * weights).sum() / sample_count),
+        "coverage_rate": float((metrics["coverage_rate"] * weights).sum() / sample_count),
+        "mae_improvement_vs_raw_c": float(
+            (metrics["mae_improvement_vs_raw_c"] * weights).sum() / sample_count
+        ),
+        "mae_improvement_vs_persistence_c": float(
+            (metrics["mae_improvement_vs_persistence_c"] * weights).sum() / sample_count
+        ),
+        "leads_better_than_raw": int((metrics["mae_improvement_vs_raw_c"] > 0).sum()),
+        "leads_better_than_persistence": int((metrics["mae_improvement_vs_persistence_c"] > 0).sum()),
+    }
+
+
+def format_float(value, digits=2, suffix=""):
+    if value is None or pd.isna(value):
+        return "n/a"
+    return f"{float(value):.{digits}f}{suffix}"
+
+
+def markdown_table(rows, headers):
+    if not rows:
+        return "_No rows._"
+
+    table = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in rows:
+        table.append("| " + " | ".join(str(row.get(header, "")) for header in headers) + " |")
+    return "\n".join(table)
+
+
+def build_target_metric_rows(metrics):
+    rows = []
+    if metrics.empty:
+        return rows
+
+    for target_key, group in metrics.groupby("target"):
+        summary = weighted_summary(group)
+        rows.append({
+            "target": target_key,
+            "samples": summary["samples"],
+            "forecast_mae_c": format_float(summary["forecast_mae_c"], 2),
+            "raw_mae_c": format_float(summary["raw_mae_c"], 2),
+            "persistence_mae_c": format_float(summary["persistence_mae_c"], 2),
+            "vs_raw_c": format_float(summary["mae_improvement_vs_raw_c"], 2),
+            "vs_persistence_c": format_float(summary["mae_improvement_vs_persistence_c"], 2),
+            "coverage": format_float(summary["coverage_rate"] * 100, 1, "%"),
+            "leads_better_raw": f"{summary['leads_better_than_raw']}/{len(group)}",
+        })
+    return rows
+
+
+def build_problem_lead_rows(metrics):
+    if metrics.empty:
+        return []
+
+    problem_leads = metrics[
+        (metrics["mae_improvement_vs_raw_c"] < 0)
+        | (metrics["mae_improvement_vs_persistence_c"] < 0)
+        | (metrics["coverage_rate"] < 0.70)
+    ].copy()
+    if problem_leads.empty:
+        return []
+
+    problem_leads["sort_risk"] = problem_leads[[
+        "mae_improvement_vs_raw_c",
+        "mae_improvement_vs_persistence_c",
+    ]].min(axis=1)
+    problem_leads = problem_leads.sort_values(["sort_risk", "coverage_rate"]).head(12)
+    rows = []
+    for _, row in problem_leads.iterrows():
+        rows.append({
+            "target": row["target"],
+            "lead_hour": int(row["lead_hour"]),
+            "samples": int(row["sample_count"]),
+            "forecast_mae_c": format_float(row["forecast_mae_c"], 2),
+            "raw_mae_c": format_float(row["raw_mae_c"], 2),
+            "persistence_mae_c": format_float(row["persistence_mae_c"], 2),
+            "vs_raw_c": format_float(row["mae_improvement_vs_raw_c"], 2),
+            "vs_persistence_c": format_float(row["mae_improvement_vs_persistence_c"], 2),
+            "coverage": format_float(row["coverage_rate"] * 100, 1, "%"),
+        })
+    return rows
+
+
+def build_metrics_dashboard(metrics):
+    if metrics.empty:
+        METRICS_HTML_PATH.write_text(
+            "<html><body><h1>Forecast Metrics</h1><p>No verified metrics yet.</p></body></html>\n",
+            encoding="utf-8",
+        )
+        return
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.12,
+        subplot_titles=("MAE by Lead Hour", "Coverage by Lead Hour"),
+    )
+    target_colors = {
+        "max": "#d62728",
+        "prom": "#1f77b4",
+        "min": "#2ca02c",
+    }
+    series_styles = {
+        "forecast_mae_c": ("forecast", "solid"),
+        "raw_mae_c": ("raw ECMWF", "dash"),
+        "persistence_mae_c": ("persistence", "dot"),
+    }
+    for target_key, group in metrics.groupby("target"):
+        group = group.sort_values("lead_hour")
+        color = target_colors.get(target_key, "#444444")
+        for column, (label, dash) in series_styles.items():
+            fig.add_trace(
+                go.Scatter(
+                    x=group["lead_hour"],
+                    y=group[column],
+                    mode="lines+markers",
+                    name=f"{target_key} {label}",
+                    line=dict(color=color, dash=dash),
+                ),
+                row=1,
+                col=1,
+            )
+        fig.add_trace(
+            go.Scatter(
+                x=group["lead_hour"],
+                y=group["coverage_rate"],
+                mode="lines+markers",
+                name=f"{target_key} coverage",
+                line=dict(color=color),
+            ),
+            row=2,
+            col=1,
+        )
+
+    fig.add_hline(y=0.8, row=2, col=1, line=dict(color="#777777", dash="dash"))
+    fig.update_yaxes(title_text="MAE (C)", row=1, col=1)
+    fig.update_yaxes(title_text="Coverage rate", row=2, col=1, range=[0, 1.05])
+    fig.update_xaxes(title_text="Lead hour", row=2, col=1)
+    fig.update_layout(
+        title=f"{STATION_NAME} Forecast Verification Metrics",
+        legend=dict(orientation="h", y=-0.18),
+        margin=dict(b=150),
+    )
+    fig.write_html(str(METRICS_HTML_PATH))
+
+
+def build_system_status(
+    run_time,
+    latest_observation_time,
+    forecast_archive,
+    verification,
+    metrics,
+    ecmwf_source,
+    self_test_status,
+):
+    summary = weighted_summary(metrics)
+    target_rows = build_target_metric_rows(metrics)
+    problem_rows = build_problem_lead_rows(metrics)
+
+    if forecast_archive.empty:
+        archive_window = "n/a"
+    else:
+        archive_run_times = pd.to_datetime(forecast_archive["run_time"], errors="coerce")
+        archive_window = f"{archive_run_times.min()} to {archive_run_times.max()} UTC"
+
+    if verification.empty:
+        verification_window = "n/a"
+    else:
+        verification_times = pd.to_datetime(verification["valid_time"], errors="coerce")
+        verification_window = f"{verification_times.min()} to {verification_times.max()} UTC"
+
+    run_time_text = to_utc_naive(run_time)
+    latest_obs_text = to_utc_naive(latest_observation_time)
+    status = "green" if summary["samples"] and summary["mae_improvement_vs_raw_c"] > 0 else "warming up"
+
+    lines = [
+        "# Forecast System Status",
+        "",
+        "This file is regenerated by the hourly forecast workflow.",
+        "",
+        "## Current Status",
+        "",
+        f"- Status: `{status}`",
+        f"- Last successful run time: `{run_time_text} UTC`",
+        f"- Latest observation used: `{latest_obs_text} UTC`",
+        f"- ECMWF source used: `{ecmwf_source or 'unknown'}`",
+        f"- Self-test: `{self_test_status}`",
+        f"- Archive rows: `{len(forecast_archive)}`",
+        f"- Verified forecast rows: `{len(verification)}`",
+        f"- Metric rows: `{len(metrics)}`",
+        f"- Archive run window: `{archive_window}`",
+        f"- Verification valid-time window: `{verification_window}`",
+        "",
+        "## Overall Metrics",
+        "",
+        markdown_table(
+            [{
+                "samples": summary["samples"],
+                "forecast_mae_c": format_float(summary["forecast_mae_c"], 2),
+                "raw_mae_c": format_float(summary["raw_mae_c"], 2),
+                "persistence_mae_c": format_float(summary["persistence_mae_c"], 2),
+                "vs_raw_c": format_float(summary["mae_improvement_vs_raw_c"], 2),
+                "vs_persistence_c": format_float(summary["mae_improvement_vs_persistence_c"], 2),
+                "coverage": format_float(summary["coverage_rate"] * 100, 1, "%"),
+                "leads_better_raw": f"{summary['leads_better_than_raw']}/{summary['rows']}",
+                "leads_better_persistence": (
+                    f"{summary['leads_better_than_persistence']}/{summary['rows']}"
+                ),
+            }],
+            [
+                "samples",
+                "forecast_mae_c",
+                "raw_mae_c",
+                "persistence_mae_c",
+                "vs_raw_c",
+                "vs_persistence_c",
+                "coverage",
+                "leads_better_raw",
+                "leads_better_persistence",
+            ],
+        ),
+        "",
+        "Positive `vs_raw_c` and `vs_persistence_c` means the corrected forecast is better.",
+        "",
+        "## Metrics By Target",
+        "",
+        markdown_table(
+            target_rows,
+            [
+                "target",
+                "samples",
+                "forecast_mae_c",
+                "raw_mae_c",
+                "persistence_mae_c",
+                "vs_raw_c",
+                "vs_persistence_c",
+                "coverage",
+                "leads_better_raw",
+            ],
+        ),
+        "",
+        "## Lead Hours To Watch",
+        "",
+        markdown_table(
+            problem_rows,
+            [
+                "target",
+                "lead_hour",
+                "samples",
+                "forecast_mae_c",
+                "raw_mae_c",
+                "persistence_mae_c",
+                "vs_raw_c",
+                "vs_persistence_c",
+                "coverage",
+            ],
+        ),
+        "",
+        "## Plots And Raw Files",
+        "",
+        "- Forecast page: [forecast_Inaquito.html](forecast_Inaquito.html)",
+        "- Metrics dashboard: [forecast_metrics.html](forecast_metrics.html)",
+        "- Current forecast CSV: [forecast_output.csv](forecast_output.csv)",
+        "- Forecast archive: [forecast_archive.csv](forecast_archive.csv)",
+        "- Forecast verification: [forecast_verification.csv](forecast_verification.csv)",
+        "- Forecast metrics: [forecast_metrics.csv](forecast_metrics.csv)",
+        "",
+        "## Operational Notes",
+        "",
+        "- The workflow should stay green even when one ECMWF mirror rate-limits; it tries Azure, Google, then AWS.",
+        "- A red workflow should be classified as data-source outage, ECMWF mirror outage, dependency issue, Python exception, or git push conflict before changing model logic.",
+        "- Do not add a more complex model unless this report shows the current correction beats raw ECMWF and persistence over enough samples.",
+        "",
+    ]
+    SYSTEM_STATUS_PATH.write_text("\n".join(lines), encoding="utf-8")
+
+
+def run_self_test():
+    run_time = pd.Timestamp("2026-04-12T06:00:00Z")
+    valid_time = pd.date_range("2026-04-12T09:00:00", periods=4, freq="3h")
+    forecast = pd.DataFrame({
+        "valid_time": valid_time,
+        "lead_hours": [3, 6, 9, 12],
+        "ecmwf_max_c": [20.0, 21.0, 22.0, 21.5],
+        "ecmwf_prom_c": [14.0, 15.0, 16.0, 15.5],
+        "ecmwf_min_c": [10.0, 10.5, 11.0, 10.8],
+    })
+    station_targets = pd.DataFrame({
+        "observed_max_c": [21.0, 22.0, 22.5, 21.0],
+        "observed_prom_c": [15.0, 15.5, 16.5, 15.2],
+        "observed_min_c": [9.0, 10.0, 10.6, 10.4],
+    }, index=valid_time)
+
+    bias_by_target = {
+        target_key: compute_local_bias(
+            forecast,
+            station_targets,
+            target_key,
+            verification=pd.DataFrame(),
+            run_time=run_time,
+        )
+        for target_key in FORECAST_TARGETS
+    }
+    corrected = apply_bias_correction(forecast, bias_by_target)
+    archive = build_forecast_archive_rows(corrected, bias_by_target, run_time)
+    verified = verify_forecast_archive(archive, station_targets)
+    metrics = summarize_verification_metrics(verified)
+
+    assert len(archive) == 12, f"expected 12 archive rows, got {len(archive)}"
+    assert len(verified) == 12, f"expected 12 verified rows, got {len(verified)}"
+    assert len(metrics) == 12, f"expected 12 metric rows, got {len(metrics)}"
+    assert set(metrics["target"]) == {"max", "prom", "min"}
+    assert set(metrics["lead_hour"]) == {3, 6, 9, 12}
+    assert metrics["forecast_mae_c"].notna().all()
+    assert metrics["raw_mae_c"].notna().all()
+    assert metrics["coverage_rate"].between(0, 1).all()
+    return "passed"
+
+
 def historical_bias_profile(verification, target_key, run_time):
     if verification.empty:
         return {}, {}, 0
@@ -834,6 +1186,9 @@ def build_plot(station_targets, forecast, bias_by_target):
 
 def main():
     run_time = pd.Timestamp.now(tz="UTC")
+    self_test_status = run_self_test()
+    print(f"Forecast system self-test {self_test_status}", flush=True)
+
     end_date = os.getenv("END_DATE", run_time.strftime("%Y-%m-%dT%H:%M:%S"))
     start_date = os.getenv(
         "START_DATE",
@@ -902,6 +1257,16 @@ def main():
     metrics = summarize_verification_metrics(verification)
     verification.to_csv(FORECAST_VERIFICATION_PATH, index=False)
     metrics.to_csv(FORECAST_METRICS_PATH, index=False)
+    build_metrics_dashboard(metrics)
+    build_system_status(
+        run_time=run_time,
+        latest_observation_time=latest_observation_time,
+        forecast_archive=forecast_archive,
+        verification=verification,
+        metrics=metrics,
+        ecmwf_source=raw_forecast.attrs.get("ecmwf_source"),
+        self_test_status=self_test_status,
+    )
 
     bias_summary = ", ".join(
         f"{FORECAST_TARGETS[target_key]['label']}: {bias_info['bias_c']:.2f} C"
@@ -909,6 +1274,7 @@ def main():
     )
     print(
         f"Saved {FORECAST_CSV_PATH} and {FORECAST_HTML_PATH}; "
+        f"wrote {SYSTEM_STATUS_PATH} and {METRICS_HTML_PATH}; "
         f"archived {len(forecast_archive)} row(s), verified {len(verification)} row(s), "
         f"metrics {len(metrics)} row(s); local bias corrections {bias_summary}",
         flush=True,
@@ -916,4 +1282,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--self-test" in sys.argv:
+        print(f"Forecast system self-test {run_self_test()}", flush=True)
+    else:
+        main()

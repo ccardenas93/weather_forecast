@@ -36,6 +36,8 @@ The workflow runs hourly and on pushes to `script.py`, `.github/workflows/foreca
    - `forecast_archive.csv`: long-format archive of every forecast run and lead time
    - `forecast_verification.csv`: archived forecasts matched to later observations
    - `forecast_metrics.csv`: MAE, RMSE, bias, coverage, and improvement by target and lead hour
+   - `SYSTEM_STATUS.md`: latest operational report regenerated after each successful run
+   - `forecast_metrics.html`: interactive metrics dashboard regenerated after each successful run
 
 ## Important Meteorological Notes
 
@@ -52,6 +54,12 @@ Fast local checks:
 python3 -c "import ast, pathlib; ast.parse(pathlib.Path('script.py').read_text()); print('syntax ok')"
 ruby -e "require 'yaml'; YAML.load_file('.github/workflows/forecast.yml'); puts 'yaml ok'"
 git diff --check
+```
+
+If dependencies are installed, run the built-in no-network self-test:
+
+```bash
+python3 script.py --self-test
 ```
 
 Synthetic logic test without network or ECMWF dependencies:

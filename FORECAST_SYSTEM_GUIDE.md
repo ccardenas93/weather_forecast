@@ -59,6 +59,8 @@ The script still downloads and stores other INAMHI observation columns in `merge
 - `forecast_archive.csv`: every forecast run in long format, with run time, valid time, target, lead hour, raw ECMWF value, corrected forecast, and uncertainty band.
 - `forecast_verification.csv`: archived forecasts matched against observations once the observed valid time is available.
 - `forecast_metrics.csv`: objective performance metrics by target and lead hour.
+- `SYSTEM_STATUS.md`: regenerated operational status report with latest run time, self-test state, archive size, weighted metrics, and lead hours to watch.
+- `forecast_metrics.html`: interactive verification dashboard with MAE and coverage plots by target and lead hour.
 
 ## How To Read The Metrics
 

@@ -47,6 +47,10 @@ jobs:
         python -m pip install --upgrade pip
         python -m pip install -r requirements.txt
 
+    - name: Run Forecast System Self Test
+      run: |
+        python script.py --self-test
+
     - name: Run Forecast Script
       run: |
         python script.py
@@ -67,6 +71,7 @@ jobs:
         git add merged_data_export.csv forecast_Inaquito.html
         git add forecast_output.csv
         git add forecast_archive.csv forecast_verification.csv forecast_metrics.csv
+        git add SYSTEM_STATUS.md forecast_metrics.html
         if git diff --staged --quiet; then
           echo "No forecast changes to commit"
         else
