@@ -5,11 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import requests
-from ecmwf.opendata import Client
-import cfgrib
 
 
 FETCH_DAYS = int(os.getenv("FETCH_DAYS", "730"))
@@ -39,6 +35,7 @@ ECMWF_SOURCES = [
 if not ECMWF_SOURCES:
     ECMWF_SOURCES = ["azure", "google", "aws"]
 ECMWF_SOURCE_RETRY_SECONDS = float(os.getenv("ECMWF_SOURCE_RETRY_SECONDS", "15"))
+FETCH_ALL_INAMHI_COLUMNS = os.getenv("FETCH_ALL_INAMHI_COLUMNS", "0").lower() in {"1", "true", "yes"}
 
 STATION_ID = 63777
 STATION_NAME = "Inaquito"
@@ -97,14 +94,19 @@ ECMWF_VARIABLE_CANDIDATES = {
     "mn2t3": ["mn2t3", "mn2t"],
 }
 
-TABLE_NAMES = [
+TEMPERATURE_TABLE_NAMES = [
+    "029030101h", "029030401h", "029030201h",  # TEMPERATURA AIRE (MAX, PROM, MIN)
+]
+
+ALL_TABLE_NAMES = [
     "009010101h", "009010201h", "009010401h",  # HUMEDAD RELATIVA DEL AIRE (MAX, MIN, PROM)
     "017140801h",  # PRECIPITACION (SUM)
     "018070201h", "018070401h", "018070101h",  # PRESION ATMOSFERICA (MIN, PROM, MAX)
     "021200201h", "021200101h", "021200401h", "021200801h",  # RADIACION SOLAR GLOBAL (MIN, MAX, PROM, SUM)
     "022200201h", "022200401h", "022200101h",  # RADIACION SOLAR REFLEJADA (MIN, PROM, MAX)
-    "029030101h", "029030401h", "029030201h",  # TEMPERATURA AIRE (MAX, PROM, MIN)
+    *TEMPERATURE_TABLE_NAMES,
 ]
+TABLE_NAMES = ALL_TABLE_NAMES if FETCH_ALL_INAMHI_COLUMNS else TEMPERATURE_TABLE_NAMES
 
 NAME_MAP = {
     "009010101h": "HUMEDAD RELATIVA DEL AIRE MAX",
@@ -119,8 +121,8 @@ NAME_MAP = {
     "021200401h": "RADIACION SOLAR GLOBAL PROM",
     "021200801h": "RADIACION SOLAR GLOBAL SUM",
     "022200201h": "RADIACION SOLAR REFLEJADA MIN",
-    "022200401h": "RADIACION SOLAR REFLEJADA MAX",
-    "022200101h": "RADIACION SOLAR REFLEJADA PROM",
+    "022200401h": "RADIACION SOLAR REFLEJADA PROM",
+    "022200101h": "RADIACION SOLAR REFLEJADA MAX",
     "029030101h": "TEMPERATURA AIRE MAX",
     "029030401h": "TEMPERATURA AIRE PROM",
     "029030201h": "TEMPERATURA AIRE MIN",
@@ -189,10 +191,15 @@ def load_station_targets(raw_data_path):
 
     hourly = data.asfreq("h")
     targets = {}
-    for key, spec in FORECAST_TARGETS.items():
-        target = hourly[spec["station_column"]].interpolate(method="time", limit=3)
-        target = target.ffill(limit=3).bfill(limit=3)
-        targets[f"observed_{key}_c"] = target
+    targets["observed_max_c"] = hourly[FORECAST_TARGETS["max"]["station_column"]].rolling(
+        "3h",
+        min_periods=3,
+    ).max()
+    targets["observed_prom_c"] = hourly[FORECAST_TARGETS["prom"]["station_column"]]
+    targets["observed_min_c"] = hourly[FORECAST_TARGETS["min"]["station_column"]].rolling(
+        "3h",
+        min_periods=3,
+    ).min()
 
     targets = pd.DataFrame(targets).dropna(how="all")
     if targets.empty:
@@ -234,6 +241,8 @@ def retrieve_ecmwf_grib(source):
     if ECMWF_GRIB_PATH.exists():
         ECMWF_GRIB_PATH.unlink()
 
+    from ecmwf.opendata import Client
+
     client = Client(source=source)
     client.retrieve(
         time=ECMWF_RUN_HOUR,
@@ -246,6 +255,8 @@ def retrieve_ecmwf_grib(source):
 
 
 def read_ecmwf_temperature_grib():
+    import cfgrib
+
     datasets = cfgrib.open_datasets(str(ECMWF_GRIB_PATH))
     forecast = None
     found_params = set()
@@ -347,6 +358,33 @@ def parse_timestamp_column(data, column):
     return data
 
 
+def filter_operational_archive_rows(archive):
+    if archive.empty or not {"run_time", "valid_time"}.issubset(archive.columns):
+        return archive
+
+    archive = parse_timestamp_column(archive.copy(), "run_time")
+    archive = parse_timestamp_column(archive, "valid_time")
+    archive = archive.dropna(subset=["run_time", "valid_time"])
+    return archive[archive["valid_time"] > archive["run_time"]].copy()
+
+
+def future_forecast_rows(forecast, run_time, latest_observation_time):
+    cutoff = max(to_utc_naive(run_time), to_utc_naive(latest_observation_time))
+    future = forecast[forecast["valid_time"] > cutoff].copy()
+    if future.empty:
+        raise RuntimeError(
+            "ECMWF returned no forecast rows later than both the run time and latest observation"
+        )
+    return future
+
+
+def mark_operational_forecast_rows(forecast, run_time, latest_observation_time):
+    marked = forecast.copy()
+    cutoff = max(to_utc_naive(run_time), to_utc_naive(latest_observation_time))
+    marked["is_operational_forecast"] = marked["valid_time"] > cutoff
+    return marked
+
+
 def load_forecast_archive(path):
     if not path.exists():
         return pd.DataFrame()
@@ -374,7 +412,7 @@ def load_forecast_archive(path):
         if column in archive.columns:
             archive[column] = pd.to_numeric(archive[column], errors="coerce")
 
-    return archive
+    return filter_operational_archive_rows(archive)
 
 
 def build_forecast_archive_rows(forecast, bias_by_target, run_time):
@@ -407,12 +445,14 @@ def build_forecast_archive_rows(forecast, bias_by_target, run_time):
     return pd.concat(target_frames, ignore_index=True)
 
 
-def update_forecast_archive(existing_archive, forecast, bias_by_target, run_time):
-    new_rows = build_forecast_archive_rows(forecast, bias_by_target, run_time)
-    archive = pd.concat([existing_archive, new_rows], ignore_index=True)
+def update_forecast_archive(existing_archive, forecast, bias_by_target, run_time, latest_observation_time):
+    operational_forecast = future_forecast_rows(forecast, run_time, latest_observation_time)
+    new_rows = build_forecast_archive_rows(operational_forecast, bias_by_target, run_time)
+    archive = pd.concat([filter_operational_archive_rows(existing_archive), new_rows], ignore_index=True)
     archive = parse_timestamp_column(archive, "run_time")
     archive = parse_timestamp_column(archive, "valid_time")
     archive = parse_timestamp_column(archive, "latest_observation_time")
+    archive = filter_operational_archive_rows(archive)
 
     cutoff = to_utc_naive(run_time) - pd.Timedelta(days=ARCHIVE_RETENTION_DAYS)
     archive = archive[archive["run_time"] >= cutoff]
@@ -465,6 +505,10 @@ def verify_forecast_archive(archive, station_targets):
         "persistence_error_c",
         "within_band",
     ]
+    if archive.empty:
+        return pd.DataFrame(columns=columns)
+
+    archive = filter_operational_archive_rows(archive)
     if archive.empty:
         return pd.DataFrame(columns=columns)
 
@@ -640,6 +684,9 @@ def build_problem_lead_rows(metrics):
 
 
 def build_metrics_dashboard(metrics):
+    from plotly.subplots import make_subplots
+    import plotly.graph_objects as go
+
     if metrics.empty:
         METRICS_HTML_PATH.write_text(
             "<html><body><h1>Forecast Metrics</h1><p>No verified metrics yet.</p></body></html>\n",
@@ -836,18 +883,18 @@ def build_system_status(
 
 def run_self_test():
     run_time = pd.Timestamp("2026-04-12T06:00:00Z")
-    valid_time = pd.date_range("2026-04-12T09:00:00", periods=4, freq="3h")
+    valid_time = pd.date_range("2026-04-12T06:00:00", periods=5, freq="3h")
     forecast = pd.DataFrame({
         "valid_time": valid_time,
-        "lead_hours": [3, 6, 9, 12],
-        "ecmwf_max_c": [20.0, 21.0, 22.0, 21.5],
-        "ecmwf_prom_c": [14.0, 15.0, 16.0, 15.5],
-        "ecmwf_min_c": [10.0, 10.5, 11.0, 10.8],
+        "lead_hours": [0, 3, 6, 9, 12],
+        "ecmwf_max_c": [19.5, 20.0, 21.0, 22.0, 21.5],
+        "ecmwf_prom_c": [13.5, 14.0, 15.0, 16.0, 15.5],
+        "ecmwf_min_c": [9.5, 10.0, 10.5, 11.0, 10.8],
     })
     station_targets = pd.DataFrame({
-        "observed_max_c": [21.0, 22.0, 22.5, 21.0],
-        "observed_prom_c": [15.0, 15.5, 16.5, 15.2],
-        "observed_min_c": [9.0, 10.0, 10.6, 10.4],
+        "observed_max_c": [20.0, 21.0, 22.0, 22.5, 21.0],
+        "observed_prom_c": [14.5, 15.0, 15.5, 16.5, 15.2],
+        "observed_min_c": [8.8, 9.0, 10.0, 10.6, 10.4],
     }, index=valid_time)
 
     bias_by_target = {
@@ -861,7 +908,12 @@ def run_self_test():
         for target_key in FORECAST_TARGETS
     }
     corrected = apply_bias_correction(forecast, bias_by_target)
-    archive = build_forecast_archive_rows(corrected, bias_by_target, run_time)
+    operational = future_forecast_rows(
+        corrected,
+        run_time,
+        pd.Timestamp("2026-04-12T06:00:00Z"),
+    )
+    archive = build_forecast_archive_rows(operational, bias_by_target, run_time)
     verified = verify_forecast_archive(archive, station_targets)
     metrics = summarize_verification_metrics(verified)
 
@@ -870,6 +922,7 @@ def run_self_test():
     assert len(metrics) == 12, f"expected 12 metric rows, got {len(metrics)}"
     assert set(metrics["target"]) == {"max", "prom", "min"}
     assert set(metrics["lead_hour"]) == {3, 6, 9, 12}
+    assert archive["valid_time"].min() > to_utc_naive(run_time)
     assert metrics["forecast_mae_c"].notna().all()
     assert metrics["raw_mae_c"].notna().all()
     assert metrics["coverage_rate"].between(0, 1).all()
@@ -1016,14 +1069,15 @@ def diagnostic_text(bias_info):
         )
     return (
         f"Bias correction: {bias_info['bias_c']:.2f} C ({bias_info['bias_source']}). "
-        f"Raw ECMWF recent RMSE: {rmse_text}.{history_text}"
+        f"Current-run overlap RMSE: {rmse_text}.{history_text}"
     )
 
 
 def target_title(target_key):
     spec = FORECAST_TARGETS[target_key]
+    target_note = "3-hour " if target_key in {"max", "min"} else ""
     return (
-        f"{STATION_NAME} {spec['label']} Temperature Forecast: "
+        f"{STATION_NAME} {target_note}{spec['label']} Temperature Forecast: "
         "ECMWF with Local Bias Correction"
     )
 
@@ -1054,6 +1108,8 @@ def target_annotations(target_key, bias_info):
 
 
 def build_plot(station_targets, forecast, bias_by_target):
+    import plotly.graph_objects as go
+
     target_order = ["max", "prom", "min"]
     default_index = target_order.index(DEFAULT_TARGET_KEY)
     fig = go.Figure()
@@ -1063,7 +1119,10 @@ def build_plot(station_targets, forecast, bias_by_target):
         bias_info = bias_by_target[target_key]
         observed_column = f"observed_{target_key}_c"
         observed = station_targets[observed_column].dropna()
-        future = forecast[forecast["valid_time"] > bias_info["latest_observation_time"]].copy()
+        if "is_operational_forecast" in forecast.columns:
+            future = forecast[forecast["is_operational_forecast"]].copy()
+        else:
+            future = forecast[forecast["valid_time"] > bias_info["latest_observation_time"]].copy()
         if future.empty:
             future = forecast.copy()
 
@@ -1244,6 +1303,11 @@ def main():
         for target_key in FORECAST_TARGETS
     }
     corrected_forecast = apply_bias_correction(raw_forecast, bias_by_target)
+    corrected_forecast = mark_operational_forecast_rows(
+        corrected_forecast,
+        run_time,
+        latest_observation_time,
+    )
     corrected_forecast.to_csv(FORECAST_CSV_PATH, index=False)
     build_plot(station_targets, corrected_forecast, bias_by_target)
 
@@ -1252,6 +1316,7 @@ def main():
         corrected_forecast,
         bias_by_target,
         run_time,
+        latest_observation_time,
     )
     verification = verify_forecast_archive(forecast_archive, station_targets)
     metrics = summarize_verification_metrics(verification)

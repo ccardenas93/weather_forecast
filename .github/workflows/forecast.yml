@@ -2,7 +2,7 @@ name: Forecast Automation
 
 on:
   schedule:
-    - cron: '0 * * * *'  # Runs the job every hours
+    - cron: '0 * * * *'  # Runs the job every hour
   workflow_dispatch:
   push:
     branches:
@@ -15,6 +15,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: forecast-automation
+  cancel-in-progress: false
+
 jobs:
   run-forecast:
     runs-on: ubuntu-latest
@@ -23,6 +27,7 @@ jobs:
       FETCH_DAYS: "730"
       FETCH_RETRIES: "3"
       FETCH_RETRY_SECONDS: "20"
+      FETCH_ALL_INAMHI_COLUMNS: "0"
       ALLOW_STALE_OBS: "1"
       BIAS_DECAY_HOURS: "36"
       BIAS_TRAINING_DAYS: "90"
@@ -49,6 +54,7 @@ jobs:
 
     - name: Run Forecast System Self Test
       run: |
+        python -m py_compile script.py
         python script.py --self-test
 
     - name: Run Forecast Script

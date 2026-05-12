@@ -9,7 +9,7 @@ Every hourly run does four things:
 1. Gets recent INAMHI observations for Inaquito.
 2. Gets ECMWF forecast data near the station, using cloud mirrors by default to avoid direct-portal rate limits.
 3. Applies a local correction so the ECMWF forecast is adjusted to the station behavior.
-4. Saves the forecast, the web page, and the verification data needed to improve future runs.
+4. Saves the forecast, the web page, and only operational future forecast rows needed to verify future runs.
 
 The public page is:
 
@@ -31,7 +31,7 @@ The page has three temperature tabs:
 - `Prom`: based on ECMWF `2t`, 2 m temperature.
 - `Min`: based on ECMWF `mn2t3`, minimum 2 m temperature in the last 3 hours.
 
-This matters because max/min should not be guessed from a single average temperature line. ECMWF has specific products for 3-hour maximum and minimum 2 m temperature, so the system uses those.
+This matters because max/min should not be guessed from a single average temperature line. ECMWF has specific products for 3-hour maximum and minimum 2 m temperature, so the system uses those and verifies them against matching 3-hour station extrema.
 
 ## What Variables Are Used Right Now
 
@@ -49,14 +49,14 @@ The current ECMWF predictors used directly are:
 
 The workflow sets `ECMWF_SOURCES=azure,google,aws`. If one mirror is busy, the script deletes the partial GRIB file and tries the next mirror. The direct `ecmwf` source can hit HTTP 429 when the open-data portal is busy, so it is not the default.
 
-The script still downloads and stores other INAMHI observation columns in `merged_data_export.csv`, such as humidity, precipitation, pressure, and radiation. They are not yet used in the forecast correction model. They should be added deliberately after the verification archive is stable.
+By default, the script downloads only the temperature observation columns used by the current correction model. Set `FETCH_ALL_INAMHI_COLUMNS=1` to also cache humidity, precipitation, pressure, and radiation for future predictor work.
 
 ## Output Files
 
 - `merged_data_export.csv`: latest INAMHI observation cache.
 - `forecast_output.csv`: the latest forecast values used by the page.
 - `forecast_Inaquito.html`: the interactive Plotly forecast page.
-- `forecast_archive.csv`: every forecast run in long format, with run time, valid time, target, lead hour, raw ECMWF value, corrected forecast, and uncertainty band.
+- `forecast_archive.csv`: operational future rows from every forecast run in long format, with run time, valid time, target, lead hour, raw ECMWF value, corrected forecast, and uncertainty band.
 - `forecast_verification.csv`: archived forecasts matched against observations once the observed valid time is available.
 - `forecast_metrics.csv`: objective performance metrics by target and lead hour.
 - `SYSTEM_STATUS.md`: regenerated operational status report with latest run time, self-test state, archive size, weighted metrics, and lead hours to watch.
