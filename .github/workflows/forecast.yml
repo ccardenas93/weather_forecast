@@ -9,7 +9,7 @@ on:
       - master
     paths:
       - '.github/workflows/forecast.yml'
-      - 'script.py'
+      - '*.py'
       - 'requirements.txt'
 
 permissions:
@@ -54,7 +54,7 @@ jobs:
 
     - name: Run Forecast System Self Test
       run: |
-        python -m py_compile script.py
+        python -m py_compile *.py
         python script.py --self-test
 
     - name: Run Forecast Script

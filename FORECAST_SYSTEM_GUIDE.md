@@ -62,6 +62,18 @@ By default, the script downloads only the temperature observation columns used b
 - `SYSTEM_STATUS.md`: regenerated operational status report with latest run time, self-test state, archive size, weighted metrics, and lead hours to watch.
 - `forecast_metrics.html`: interactive verification dashboard with MAE and coverage plots by target and lead hour.
 
+## Code Layout
+
+- `script.py`: orchestration entrypoint used by GitHub Actions.
+- `forecast_config.py`: environment settings, station metadata, paths, target definitions, and INAMHI table names.
+- `observations.py`: INAMHI fetch and station target loading.
+- `ecmwf_forecast.py`: ECMWF open-data retrieval and GRIB extraction.
+- `calibration.py`: local bias estimation and forecast correction.
+- `archive.py`: operational forecast archive and verification joins.
+- `metrics.py`: forecast verification metric calculations.
+- `plot_outputs.py`, `metrics_dashboard.py`, `status_output.py`: generated HTML and Markdown outputs.
+- `self_test.py`: dependency-light forecast logic self-test.
+
 ## How To Read The Metrics
 
 The most important fields in `forecast_metrics.csv` are:
