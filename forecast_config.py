@@ -18,10 +18,13 @@ MIN_MOS_SAMPLES = int(os.getenv("MIN_MOS_SAMPLES", "25"))
 MOS_UNCERTAINTY_INFLATION = float(os.getenv("MOS_UNCERTAINTY_INFLATION", "1.1"))
 RECENT_METRICS_DAYS = int(os.getenv("RECENT_METRICS_DAYS", "30"))
 
-# INAMHI WRF (INAMHI-GEOGLOWS GeoTIFF service). Leave WRF_SERVICE_URL empty to disable.
+# INAMHI WRF (INAMHI-GEOGLOWS GeoTIFF service). Set WRF_SERVICE_URL=off to disable.
 # Request shape: GET {WRF_SERVICE_URL}?layer=wrf_temperature&datetime=<init YYYYMMDD>_<valid YYYYMMDDHHMM>
 # Valid times in the file names are local time (America/Guayaquil, UTC-5), every 3 h from 01:00 to +70 h.
-WRF_SERVICE_URL = os.getenv("WRF_SERVICE_URL", "").strip()
+DEFAULT_WRF_SERVICE_URL = "https://services.geoglows.org/api/met-data-explorer/donwload-geotiff"
+WRF_SERVICE_URL = (os.getenv("WRF_SERVICE_URL", "").strip() or DEFAULT_WRF_SERVICE_URL).strip()
+if WRF_SERVICE_URL.lower() in {"off", "disabled", "none"}:
+    WRF_SERVICE_URL = ""
 WRF_TEMPERATURE_LAYER = os.getenv("WRF_TEMPERATURE_LAYER", "wrf_temperature")
 WRF_LOCAL_UTC_OFFSET_HOURS = int(os.getenv("WRF_LOCAL_UTC_OFFSET_HOURS", "-5"))
 WRF_VALID_HOURS = [

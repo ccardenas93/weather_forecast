@@ -8,7 +8,7 @@ Every hourly run does five things:
 
 1. Gets recent INAMHI observations for Inaquito (the API only returns about 30 days).
 2. Gets ECMWF forecast data near the station, using cloud mirrors by default to avoid direct-portal rate limits.
-3. Gets the INAMHI WRF 2 m temperature at the station from the INAMHI-GEOGLOWS GeoTIFF service, when `WRF_SERVICE_URL` is set.
+3. Gets the INAMHI WRF 2 m temperature at the station from the INAMHI-GEOGLOWS GeoTIFF service (`services.geoglows.org/api/met-data-explorer/donwload-geotiff`, enabled by default; set `WRF_SERVICE_URL=off` to disable).
 4. Builds a statistical correction (MOS) per hour of day from the verified history and applies it.
 5. Saves the forecast, the web page, the forecast archive, the cumulative verification file and the metrics.
 
@@ -46,7 +46,7 @@ observed = a + b * raw ECMWF + c * climatology + d * anomaly [+ e * WRF]
 
 - `climatology`: mean observation for that hour of day over the trailing 30 days. This is the no-skill benchmark.
 - `anomaly`: latest observation minus its climatology, decayed with `exp(-hours since observation / 36)`.
-- `WRF`: INAMHI WRF 2 m temperature at the same valid time, used only once at least 25 verified cases with WRF exist per hour.
+- `WRF`: INAMHI WRF 2 m temperature at the same valid time (0.027 degree grid, valid hours in local time every 3 h out to +70 h, usually published for the previous day's initialization), used only once at least 25 verified cases with WRF exist per hour.
 
 Predictor sets are tried in order `mos_wrf`, `mos`, `mos_basic`; if none has enough samples for an hour the system falls
 back to an hour-of-day median offset, and finally to the current-run overlap bias with 36-hour decay. The method used
@@ -112,7 +112,7 @@ The most important fields in `forecast_metrics.csv` and `SYSTEM_STATUS.md` are:
 
 ## Next Steps
 
-1. Set `WRF_SERVICE_URL` as a repository secret so the WRF predictor starts accumulating history.
+1. Let the WRF predictor accumulate about 25 days of verified cases per hour; `mos_wrf` activates by itself after that.
 2. Add ECMWF cloud cover, radiation and dewpoint as predictors for the afternoon hours.
 3. Add nearby stations to constrain the spatial pattern.
 4. Add ECMWF ensemble spread to make the uncertainty band flow dependent.

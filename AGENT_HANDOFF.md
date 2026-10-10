@@ -27,7 +27,7 @@ The workflow runs hourly and on pushes to `script.py`, `.github/workflows/foreca
    - `2t`: instantaneous 2 m temperature
    - `mn2t3`: min 2 m temperature in the previous 3 hours
    - Default sources are `azure,google,aws` via `ECMWF_SOURCES`, because individual mirrors can rate-limit under load.
-5. Optionally downloads INAMHI WRF 2 m temperature GeoTIFFs (`wrf_forecast.py`, needs `WRF_SERVICE_URL`).
+5. Downloads INAMHI WRF 2 m temperature GeoTIFFs (`wrf_forecast.py`) from `services.geoglows.org/api/met-data-explorer/donwload-geotiff` (the typo is in the real endpoint); `WRF_SERVICE_URL=off` disables it.
 6. Applies a per-hour MOS regression (`calibration.py`): observed ~ raw ECMWF + 30-day climatology + decayed
    latest observed anomaly [+ WRF]. Falls back to an hour-of-day median offset, then to the current-run overlap bias.
    See `FORECAST_SYSTEM_GUIDE.md` for the six-month verification that motivated this.
