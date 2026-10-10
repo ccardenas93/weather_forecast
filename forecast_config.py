@@ -10,6 +10,29 @@ BIAS_DECAY_HOURS = float(os.getenv("BIAS_DECAY_HOURS", "36"))
 BIAS_TRAINING_DAYS = int(os.getenv("BIAS_TRAINING_DAYS", "90"))
 MIN_BIAS_SAMPLES = int(os.getenv("MIN_BIAS_SAMPLES", "8"))
 ARCHIVE_RETENTION_DAYS = int(os.getenv("ARCHIVE_RETENTION_DAYS", "180"))
+VERIFICATION_RETENTION_DAYS = int(os.getenv("VERIFICATION_RETENTION_DAYS", "400"))
+CLIMATOLOGY_DAYS = int(os.getenv("CLIMATOLOGY_DAYS", "30"))
+MIN_CLIMATOLOGY_SAMPLES = int(os.getenv("MIN_CLIMATOLOGY_SAMPLES", "10"))
+MOS_TRAINING_DAYS = int(os.getenv("MOS_TRAINING_DAYS", "60"))
+MIN_MOS_SAMPLES = int(os.getenv("MIN_MOS_SAMPLES", "25"))
+MOS_UNCERTAINTY_INFLATION = float(os.getenv("MOS_UNCERTAINTY_INFLATION", "1.1"))
+RECENT_METRICS_DAYS = int(os.getenv("RECENT_METRICS_DAYS", "30"))
+
+# INAMHI WRF (INAMHI-GEOGLOWS GeoTIFF service). Leave WRF_SERVICE_URL empty to disable.
+# Request shape: GET {WRF_SERVICE_URL}?layer=wrf_temperature&datetime=<init YYYYMMDD>_<valid YYYYMMDDHHMM>
+# Valid times in the file names are local time (America/Guayaquil, UTC-5), every 3 h from 01:00 to +70 h.
+WRF_SERVICE_URL = os.getenv("WRF_SERVICE_URL", "").strip()
+WRF_TEMPERATURE_LAYER = os.getenv("WRF_TEMPERATURE_LAYER", "wrf_temperature")
+WRF_LOCAL_UTC_OFFSET_HOURS = int(os.getenv("WRF_LOCAL_UTC_OFFSET_HOURS", "-5"))
+WRF_VALID_HOURS = [
+    int(step.strip())
+    for step in os.getenv("WRF_VALID_HOURS", ",".join(str(h) for h in range(1, 73, 3))).split(",")
+    if step.strip()
+]
+WRF_MAX_LOOKBACK_DAYS = int(os.getenv("WRF_MAX_LOOKBACK_DAYS", "3"))
+WRF_DOWNLOAD_THREADS = int(os.getenv("WRF_DOWNLOAD_THREADS", "6"))
+WRF_MIN_FILE_BYTES = int(os.getenv("WRF_MIN_FILE_BYTES", "10000"))
+WRF_REQUEST_TIMEOUT_SECONDS = float(os.getenv("WRF_REQUEST_TIMEOUT_SECONDS", "60"))
 ECMWF_RUN_HOUR = int(os.getenv("ECMWF_RUN_HOUR", "6"))
 ECMWF_STEPS = [
     int(step.strip())

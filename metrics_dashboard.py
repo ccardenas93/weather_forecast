@@ -28,6 +28,8 @@ def build_metrics_dashboard(metrics):
         "forecast_mae_c": ("forecast", "solid"),
         "raw_mae_c": ("raw ECMWF", "dash"),
         "persistence_mae_c": ("persistence", "dot"),
+        "climatology_mae_c": ("climatology", "dashdot"),
+        "wrf_mae_c": ("raw WRF", "longdash"),
     }
     for target_key, group in metrics.groupby("target"):
         group = group.sort_values("lead_hour")

@@ -8,7 +8,7 @@ This repo builds an automated temperature forecast page for the INAMHI Inaquito 
 - Main script: `script.py`
 - GitHub workflow: `.github/workflows/forecast.yml`
 - Public page entry point: `index.html`, redirecting to `forecast_Inaquito.html`
-- Current pushed feature: max/prom/min forecast tabs plus forecast archive and verification system
+- Current pushed feature: MOS correction (ECMWF + climatology + anomaly + optional WRF), cumulative verification, climatology and WRF baselines
 
 The workflow runs hourly and on pushes to `script.py`, `.github/workflows/forecast.yml`, and `requirements.txt`.
 
@@ -27,9 +27,10 @@ The workflow runs hourly and on pushes to `script.py`, `.github/workflows/foreca
    - `2t`: instantaneous 2 m temperature
    - `mn2t3`: min 2 m temperature in the previous 3 hours
    - Default sources are `azure,google,aws` via `ECMWF_SOURCES`, because individual mirrors can rate-limit under load.
-5. Applies local bias correction:
-   - Uses verified historical lead-time bias when enough samples exist.
-   - Falls back to the latest observation/current-run overlap with exponential decay.
+5. Optionally downloads INAMHI WRF 2 m temperature GeoTIFFs (`wrf_forecast.py`, needs `WRF_SERVICE_URL`).
+6. Applies a per-hour MOS regression (`calibration.py`): observed ~ raw ECMWF + 30-day climatology + decayed
+   latest observed anomaly [+ WRF]. Falls back to an hour-of-day median offset, then to the current-run overlap bias.
+   See `FORECAST_SYSTEM_GUIDE.md` for the six-month verification that motivated this.
 6. Writes:
    - `forecast_output.csv`: current corrected forecast
    - `forecast_Inaquito.html`: Plotly page with Max / Prom / Min buttons
@@ -43,7 +44,9 @@ The workflow runs hourly and on pushes to `script.py`, `.github/workflows/foreca
 
 - `mx2t3` and `mn2t3` are 3-hour extrema, not exact station hourly extrema. This is more honest than deriving max/min from only `2t`, but the target definition mismatch still matters.
 - The forecast is currently only for one point. It does not yet learn spatial gradients, elevation effects, valley effects, urban heat island effects, or neighboring-station consistency.
-- The system now has a memory layer, but it needs a few successful hourly runs before historical lead-time calibration becomes active.
+- `forecast_verification.csv` is cumulative and was seeded on 2026-10-10 with six months of history rebuilt from git snapshots of the observation cache. Do not rebuild it from the 30-day cache; the INAMHI API never returns more than about 30 days.
+- Metrics count one sample per target, valid time and ECMWF cycle. Hourly reruns reuse the 06Z cycle and are not independent.
+- The honest benchmark is the 30-day diurnal climatology (`climatology_mae_c`), not persistence.
 - Do not reintroduce SARIMAX/LSTM as the core forecaster. With one station and limited data, that adds complexity without improving the meteorological foundation.
 
 ## Checks To Run

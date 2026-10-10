@@ -4,12 +4,16 @@ import sys
 import pandas as pd
 
 from archive import (
+    backfill_archive_climatology,
     load_forecast_archive,
+    load_verification_history,
     mark_operational_forecast_rows,
+    merge_verification_history,
+    save_verification_history,
     update_forecast_archive,
     verify_forecast_archive,
 )
-from calibration import apply_bias_correction, compute_local_bias
+from calibration import apply_bias_correction, compute_local_bias, diurnal_climatology
 from ecmwf_forecast import download_ecmwf_temperatures
 from forecast_config import (
     ALLOW_STALE_OBS,
@@ -23,15 +27,17 @@ from forecast_config import (
     FORECAST_VERIFICATION_PATH,
     METRICS_HTML_PATH,
     RAW_DATA_PATH,
+    RECENT_METRICS_DAYS,
     STATION_ID,
     STATION_NAME,
     SYSTEM_STATUS_PATH,
     TABLE_NAMES,
 )
-from metrics import summarize_verification_metrics
+from metrics import summarize_by_method, summarize_verification_metrics
 from observations import fetch_weather_data, load_station_targets
 from outputs import build_metrics_dashboard, build_plot, build_system_status
 from self_test import run_self_test
+from wrf_forecast import download_wrf_temperature, merge_wrf_into_forecast, wrf_enabled
 
 
 def main():
@@ -68,11 +74,24 @@ def main():
         flush=True,
     )
 
-    forecast_archive = load_forecast_archive(FORECAST_ARCHIVE_PATH)
-    historical_verification = verify_forecast_archive(forecast_archive, station_targets)
+    climatology_by_target = {
+        target_key: diurnal_climatology(station_targets, target_key, run_time)
+        for target_key in FORECAST_TARGETS
+    }
+    forecast_archive = backfill_archive_climatology(
+        load_forecast_archive(FORECAST_ARCHIVE_PATH),
+        climatology_by_target,
+    )
+    verification_history = load_verification_history(FORECAST_VERIFICATION_PATH)
+    historical_verification = merge_verification_history(
+        verification_history,
+        verify_forecast_archive(forecast_archive, station_targets),
+        run_time,
+    )
     print(
         f"Loaded {len(forecast_archive)} archived forecast row(s); "
-        f"{len(historical_verification)} verified row(s) available for calibration",
+        f"{len(historical_verification)} verified row(s) available for calibration "
+        f"({len(verification_history)} from the cumulative history)",
         flush=True,
     )
 
@@ -83,6 +102,17 @@ def main():
     )
     raw_forecast = download_ecmwf_temperatures()
     print(f"Using ECMWF source {raw_forecast.attrs.get('ecmwf_source')}", flush=True)
+    if wrf_enabled():
+        print("Retrieving INAMHI WRF 2 m temperature", flush=True)
+        wrf_forecast = download_wrf_temperature(run_time)
+    else:
+        print("WRF_SERVICE_URL not set; running on ECMWF only", flush=True)
+        wrf_forecast = None
+    raw_forecast = merge_wrf_into_forecast(raw_forecast, wrf_forecast)
+    print(
+        f"WRF temperature attached to {int(raw_forecast['wrf_temp_c'].notna().sum())} of {len(raw_forecast)} ECMWF step(s)",
+        flush=True,
+    )
     bias_by_target = {
         target_key: compute_local_bias(
             raw_forecast,
@@ -90,6 +120,7 @@ def main():
             target_key,
             verification=historical_verification,
             run_time=run_time,
+            climatology_by_hour=climatology_by_target[target_key],
         )
         for target_key in FORECAST_TARGETS
     }
@@ -109,9 +140,16 @@ def main():
         run_time,
         latest_observation_time,
     )
-    verification = verify_forecast_archive(forecast_archive, station_targets)
+    verification = merge_verification_history(
+        historical_verification,
+        verify_forecast_archive(forecast_archive, station_targets),
+        run_time,
+    )
     metrics = summarize_verification_metrics(verification)
-    verification.to_csv(FORECAST_VERIFICATION_PATH, index=False)
+    recent_since = run_time - pd.Timedelta(days=RECENT_METRICS_DAYS)
+    recent_metrics = summarize_verification_metrics(verification, since=recent_since)
+    method_summary = summarize_by_method(verification)
+    save_verification_history(verification, FORECAST_VERIFICATION_PATH)
     metrics.to_csv(FORECAST_METRICS_PATH, index=False)
     build_metrics_dashboard(metrics)
     build_system_status(
@@ -122,17 +160,22 @@ def main():
         metrics=metrics,
         ecmwf_source=raw_forecast.attrs.get("ecmwf_source"),
         self_test_status=self_test_status,
+        recent_metrics=recent_metrics,
+        method_summary=method_summary,
+        bias_by_target=bias_by_target,
     )
 
-    bias_summary = ", ".join(
-        f"{FORECAST_TARGETS[target_key]['label']}: {bias_info['bias_c']:.2f} C"
+    calibration_summary = ", ".join(
+        f"{FORECAST_TARGETS[target_key]['label']}: "
+        + "/".join(f"{method} {len(profile)} h" for method, profile in bias_info["mos_profiles"].items())
+        + f", offset {len(bias_info['hour_bias_c'])} h, fallback {bias_info['bias_c']:.2f} C"
         for target_key, bias_info in bias_by_target.items()
     )
     print(
         f"Saved {FORECAST_CSV_PATH} and {FORECAST_HTML_PATH}; "
         f"wrote {SYSTEM_STATUS_PATH} and {METRICS_HTML_PATH}; "
         f"archived {len(forecast_archive)} row(s), verified {len(verification)} row(s), "
-        f"metrics {len(metrics)} row(s); local bias corrections {bias_summary}",
+        f"metrics {len(metrics)} row(s); calibration {calibration_summary}",
         flush=True,
     )
 

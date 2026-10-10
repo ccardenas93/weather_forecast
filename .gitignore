@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+*.idx
+surface_temp_multi.grib2

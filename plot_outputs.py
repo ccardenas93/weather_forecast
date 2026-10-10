@@ -11,12 +11,13 @@ def diagnostic_text(bias_info):
     history_text = ""
     if bias_info["historical_sample_count"]:
         history_text = (
-            f" Verified archive samples: {bias_info['historical_sample_count']}; "
-            f"calibrated leads: {len(bias_info['lead_bias_c'])}."
+            f" Verified samples: {bias_info['historical_sample_count']}; "
+            f"MOS hours: {len(bias_info.get('mos_profile', {}))}; "
+            f"offset hours: {len(bias_info.get('hour_bias_c', {}))}."
         )
     return (
-        f"Bias correction: {bias_info['bias_c']:.2f} C ({bias_info['bias_source']}). "
-        f"Current-run overlap RMSE: {rmse_text}.{history_text}"
+        f"Correction: {bias_info['bias_source']}. "
+        f"Fallback bias {bias_info['bias_c']:.2f} C; current-run overlap RMSE: {rmse_text}.{history_text}"
     )
 
 
@@ -25,7 +26,7 @@ def target_title(target_key):
     target_note = "3-hour " if target_key in {"max", "min"} else ""
     return (
         f"{STATION_NAME} {target_note}{spec['label']} Temperature Forecast: "
-        "ECMWF with Local Bias Correction"
+        "ECMWF + Climatology MOS Correction"
     )
 
 
@@ -77,6 +78,7 @@ def build_plot(station_targets, forecast, bias_by_target):
         plot_values = pd.concat([
             observed.iloc[-120:],
             forecast[spec["raw_column"]],
+            forecast["wrf_temp_c"] if "wrf_temp_c" in forecast else pd.Series(dtype=float),
             future[spec["lower_column"]],
             future[spec["upper_column"]],
             future[spec["forecast_column"]],
@@ -126,7 +128,7 @@ def build_plot(station_targets, forecast, bias_by_target):
             x=future["valid_time"],
             y=future[spec["forecast_column"]],
             mode="lines+markers",
-            name=f"Bias-corrected {spec['label']}",
+            name=f"Corrected {spec['label']} (MOS)",
             visible=visible,
             line=dict(color="#d62728"),
         ))
@@ -137,6 +139,25 @@ def build_plot(station_targets, forecast, bias_by_target):
             name=f"{spec['label']} persistence",
             visible=visible,
             line=dict(color="#7f7f7f", dash="dot"),
+        ))
+        climatology_column = f"climatology_{target_key}_c"
+        fig.add_trace(go.Scatter(
+            x=future["valid_time"],
+            y=future[climatology_column] if climatology_column in future else [],
+            mode="lines",
+            name=f"{spec['label']} 30-day climatology",
+            visible=visible,
+            line=dict(color="#bcbd22", dash="dashdot"),
+        ))
+        wrf_rows = future.dropna(subset=["wrf_temp_c"]) if "wrf_temp_c" in future else future.iloc[0:0]
+        fig.add_trace(go.Scatter(
+            x=wrf_rows["valid_time"],
+            y=wrf_rows["wrf_temp_c"] if "wrf_temp_c" in wrf_rows else [],
+            mode="lines+markers",
+            name="Raw INAMHI WRF 2 m temperature",
+            visible=visible,
+            line=dict(color="#9467bd", dash="longdash"),
+            marker=dict(symbol="square", size=5),
         ))
         fig.add_trace(go.Scatter(
             x=[latest_observation_time, latest_observation_time],
@@ -149,7 +170,7 @@ def build_plot(station_targets, forecast, bias_by_target):
         ))
 
     buttons = []
-    traces_per_target = 7
+    traces_per_target = 9
     for target_index, target_key in enumerate(target_order):
         visible = [False] * len(fig.data)
         start = target_index * traces_per_target

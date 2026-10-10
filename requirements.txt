@@ -7,3 +7,4 @@ eccodes
 cfgrib
 ecmwf-opendata
 plotly
+rasterio
